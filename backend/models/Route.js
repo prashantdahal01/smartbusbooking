@@ -1,16 +1,20 @@
-// MongoDB schema for routes defining source, destination, stops, and distance
 const mongoose = require("mongoose");
 
-const RouteSchema = new mongoose.Schema(
-  {
-    routeName: String,      // Human-readable route name
-    source: String,         // Starting location
-    destination: String,    // Ending location
-    stops: [String],        // Intermediate stops along the route
-    distance: Number,       // Total distance in kilometers
-    estimatedDuration: Number, // Estimated travel time in minutes
-  },
-  { timestamps: true }
-);
+const routeSchema = new mongoose.Schema({
+  source: String,
+  destination: String,
+  distance: Number,
 
-module.exports = mongoose.model("Route", RouteSchema);
+  // Ordered districts passed through for stop generation (optional).
+  // Example: ["Kathmandu", "Bhaktapur", "Kavre", "Sindhuli", "Sunsari", "Morang", "Jhapa"]
+  districtsCovered: { type: [String], default: [] },
+
+  stops: {
+    // Backwards compatible: historically stored as string[]
+    // New format supported by the UI/API: { name: string, kmFromSource?: number }
+    type: [mongoose.Schema.Types.Mixed],
+    default: [],
+  },
+});
+
+module.exports = mongoose.model("Route", routeSchema);

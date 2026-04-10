@@ -102,13 +102,20 @@ smart-bus-booking-system/
 
 ## Getting Started
 
+### Prerequisites
+- Node.js 18+ recommended
+- MongoDB running locally (or set `MONGO_URI` to MongoDB Atlas)
+
 ### Backend
 ```bash
 cd backend
 npm install
 cp .env.example .env   # configure your environment variables
+npm run seed            # optional: create demo users + schedules
 npm run dev
 ```
+
+**Windows note:** if PowerShell blocks `npm` with an execution policy error, use `npm.cmd` instead (e.g. `npm.cmd install`).
 
 ### Frontend
 ```bash
@@ -119,8 +126,38 @@ npm run dev
 
 ## Environment Variables (backend/.env)
 ```
-PORT=5000
+PORT=5001
 MONGO_URI=mongodb://localhost:27017/smartbusbooking
 JWT_SECRET=your_jwt_secret_key
 JWT_EXPIRES_IN=7d
+
+# Used for payment redirects/callback URLs
+FRONTEND_URL=http://localhost:5173
+PUBLIC_BASE_URL=http://localhost:5001
+
+# Require online payment to confirm bookings
+REQUIRE_ONLINE_PAYMENT=true
+
+# eSewa ePay v2 (TEST / RC)
+ESEWA_PRODUCT_CODE=EPAYTEST
+ESEWA_SECRET_KEY=8gBm/:&EnhH.1/q
+ESEWA_FORM_URL=https://rc-epay.esewa.com.np/api/epay/main/v2/form
+ESEWA_STATUS_URL=https://rc.esewa.com.np/api/epay/transaction/status/
+
+# SMTP (required to email tickets after successful payment)
+# Gmail example (IMPORTANT: use an App Password, not your normal Gmail password)
+# 1) Enable 2‑Step Verification on your Google account
+# 2) Create an App Password: https://myaccount.google.com/apppasswords
+# 3) Use that 16‑character App Password in SMTP_PASSWORD
+SMTP_PROVIDER=gmail
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_gmail@gmail.com
+SMTP_PASSWORD=your_app_password
+SMTP_FROM_ADDRESS=your_gmail@gmail.com
+```
+
+## Environment Variables (frontend/.env)
+```bash
+VITE_API_URL=http://localhost:5001/api
 ```

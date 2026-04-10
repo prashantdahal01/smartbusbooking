@@ -1,23 +1,48 @@
-// MongoDB schema for schedules linking a bus to a route at a specific date/time
 const mongoose = require("mongoose");
 
-const ScheduleSchema = new mongoose.Schema(
-  {
-    bus: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Bus",           // Reference to the bus
-    },
-    route: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Route",         // Reference to the route
-    },
-    departureTime: Date,    // Scheduled departure date and time
-    arrivalTime: Date,      // Scheduled arrival date and time
-    fare: Number,           // Base ticket fare for this schedule
-    availableSeats: Number, // Number of currently available seats
-    status: String,         // e.g., scheduled, departed, cancelled
-  },
-  { timestamps: true }
+const pointSchema = new mongoose.Schema(
+	{
+		name: String,
+		time: String,
+		date: String,
+	},
+	{ _id: false }
 );
 
-module.exports = mongoose.model("Schedule", ScheduleSchema);
+const policiesSchema = new mongoose.Schema(
+	{
+		refundPolicy: String,
+		cancellationPolicy: String,
+		dateChangePolicy: String,
+	},
+	{ _id: false }
+);
+
+const scheduleSchema = new mongoose.Schema({
+  bus: { type: mongoose.Schema.Types.ObjectId, ref: "Bus" },
+  route: { type: mongoose.Schema.Types.ObjectId, ref: "Route" },
+  date: String,
+  time: String,
+  arrivalDate: String,
+  arrivalTime: String,
+  durationMinutes: Number,
+
+  // price is treated as per-seat price in the current app
+  price: Number,
+  priceMin: Number,
+  priceMax: Number,
+
+  refundable: { type: Boolean, default: false },
+
+  // Display-only tags like: women_traveling, free_date_change, exclusive_deals, flexi_ticket
+  features: { type: [String], default: [] },
+
+  amenities: { type: [String], default: [] },
+
+  policies: policiesSchema,
+
+  boardingPoints: { type: [pointSchema], default: [] },
+  droppingPoints: { type: [pointSchema], default: [] },
+});
+
+module.exports = mongoose.model("Schedule", scheduleSchema);

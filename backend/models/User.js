@@ -4,7 +4,12 @@ const mongoose = require("mongoose");
 const UserSchema = new mongoose.Schema(
   {
     name: String,           // Full name of the user
-    email: String,          // Unique email address
+    email: {
+      type: String,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },          // Unique email address
     password: String,       // Hashed password
     role: {
       type: String,
@@ -12,7 +17,11 @@ const UserSchema = new mongoose.Schema(
       default: "customer",
     },
     phone: String,          // Contact number
-    isActive: Boolean,      // Account status flag
+    isActive: { type: Boolean, default: true },      // Account status flag
+
+    // Password reset (secure: store hashed token, not the raw token)
+    passwordResetToken: { type: String, select: false, index: true },
+    passwordResetExpires: { type: Date, select: false },
   },
   { timestamps: true }
 );

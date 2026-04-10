@@ -12,6 +12,10 @@ build/
 **/dist/
 **/build/
 
+# Uploaded assets
+backend/uploads/
+**/uploads/
+
 # Logs
 logs/
 *.log

@@ -1,13 +1,19 @@
-// API routes for route management (admin role required for mutations)
+// API routes for route listing and stop retrieval
 const express = require("express");
 const router = express.Router();
-// const routeController = require("../controllers/route.controller");
-// const { verifyToken } = require("../middleware/auth.middleware");
-// const { authorizeRoles } = require("../middleware/role.middleware");
 
-// GET    /api/routes        – List all routes
-// POST   /api/routes        – Add a new route (admin)
-// PUT    /api/routes/:id    – Update route details (admin)
-// DELETE /api/routes/:id    – Delete a route (admin)
+const routeController = require("../controllers/route.controller");
+const stopController = require("../controllers/stop.controller");
+const { verifyToken } = require("../middleware/auth.middleware");
+const { authorizeRoles } = require("../middleware/role.middleware");
+
+// GET /api/routes
+router.get("/", routeController.listRoutes);
+
+// POST /api/routes (admin)
+router.post("/", verifyToken, authorizeRoles("admin"), routeController.createRoute);
+
+// GET /api/routes/:id/stops
+router.get("/:id/stops", stopController.getStopsByRoute);
 
 module.exports = router;

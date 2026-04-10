@@ -1,20 +1,16 @@
-// MongoDB schema for temporarily locking seats during the booking process
 const mongoose = require("mongoose");
 
-const SeatLockSchema = new mongoose.Schema(
-  {
-    schedule: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Schedule",      // The schedule the seat belongs to
-    },
-    seat: String,           // Seat number being locked
-    lockedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",          // The user holding the lock
-    },
-    expiresAt: Date,        // Lock expiry time (auto-release after timeout)
-  },
-  { timestamps: true }
-);
+const seatLockSchema = new mongoose.Schema({
+  seatNumber: Number,
+  schedule: { type: mongoose.Schema.Types.ObjectId, ref: "Schedule" },
+  lockedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  lockedAt: {
+    type: Date,
+    default: Date.now,
+    expires: 600
+  }
+});
 
-module.exports = mongoose.model("SeatLock", SeatLockSchema);
+seatLockSchema.index({ schedule: 1, seatNumber: 1 }, { unique: true });
+
+module.exports = mongoose.model("SeatLock", seatLockSchema);
