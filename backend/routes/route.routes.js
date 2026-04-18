@@ -10,6 +10,9 @@ const { authorizeRoles } = require("../middleware/role.middleware");
 // GET /api/routes
 router.get("/", routeController.listRoutes);
 
+// GET /api/routes/popular
+router.get("/popular", routeController.listPopularRoutes);
+
 // POST /api/routes (admin)
 router.post("/", verifyToken, authorizeRoles("admin"), routeController.createRoute);
 

@@ -11,37 +11,43 @@ const buildTicketEmail = (booking) => {
 	const bus = booking?.schedule?.bus;
 	const passenger = booking?.passenger;
 
-	const subject = `SmartBus Ticket • ${safeString(route?.source)} → ${safeString(route?.destination)}`.trim();
+	const subject = "Bus Ticket Confirmation";
 	const seatText = Array.isArray(booking?.seats) ? booking.seats.join(", ") : "";
 	const total = booking?.totalPrice != null ? safeString(booking.totalPrice) : "";
+	const passengerName = safeString(passenger?.name).trim() || "Customer";
+	const routeLabel = `${safeString(route?.source)} -> ${safeString(route?.destination)}`.trim();
+	const dateTimeLabel = `${safeString(booking?.schedule?.date)} ${safeString(booking?.schedule?.time)}`.trim();
 
 	const text = [
-		"Your SmartBus ticket is confirmed.",
-		"(Your ticket PDF is attached.)",
+		`Hi ${passengerName},`,
+		"",
+		"Your booking is confirmed. Your e-ticket PDF is attached.",
 		"",
 		`Booking ID: ${safeString(booking?._id)}`,
-		`Route: ${safeString(route?.source)} → ${safeString(route?.destination)}`,
-		`Date/Time: ${safeString(booking?.schedule?.date)} ${safeString(booking?.schedule?.time)}`,
+		`Route: ${routeLabel}`,
+		`Travel Date & Time: ${dateTimeLabel}`,
 		`Bus: ${safeString(bus?.name)}${bus?.vehicleNumber ? ` (${bus.vehicleNumber})` : ""}`,
-		`Passenger: ${safeString(passenger?.name)}${passenger?.gender ? ` (${passenger.gender})` : ""}`,
+		`Passenger: ${passengerName}${passenger?.gender ? ` (${safeString(passenger.gender)})` : ""}`,
 		`Seats: ${seatText}`,
 		`Total: ${total}`,
+		"",
+		"Thank you for choosing SmartBus.",
 	].join("\n");
 
 	const html = `
 		<div style="font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; line-height: 1.5; color: #0f172a;">
-			<h2 style="margin:0 0 8px;">Your ticket is confirmed</h2>
-			<p style="margin:0 0 16px; color:#475569;">Thanks for booking with SmartBus. Your ticket PDF is attached.</p>
+			<h2 style="margin:0 0 8px;">Bus Ticket Confirmation</h2>
+			<p style="margin:0 0 16px; color:#475569;">Hi ${passengerName}, your booking is confirmed. Your e-ticket PDF is attached.</p>
 			<div style="border:1px solid #e2e8f0; border-radius: 12px; padding: 14px; background:#f8fafc;">
 				<div><strong>Booking ID:</strong> ${safeString(booking?._id)}</div>
-				<div><strong>Route:</strong> ${safeString(route?.source)} → ${safeString(route?.destination)}</div>
-				<div><strong>Date/Time:</strong> ${safeString(booking?.schedule?.date)} ${safeString(booking?.schedule?.time)}</div>
+				<div><strong>Route:</strong> ${routeLabel}</div>
+				<div><strong>Travel Date & Time:</strong> ${dateTimeLabel}</div>
 				<div><strong>Bus:</strong> ${safeString(bus?.name)}${bus?.vehicleNumber ? ` (${safeString(bus.vehicleNumber)})` : ""}</div>
-				<div><strong>Passenger:</strong> ${safeString(passenger?.name)}${passenger?.gender ? ` (${safeString(passenger.gender)})` : ""}</div>
+				<div><strong>Passenger:</strong> ${passengerName}${passenger?.gender ? ` (${safeString(passenger.gender)})` : ""}</div>
 				<div><strong>Seats:</strong> ${seatText}</div>
 				<div><strong>Total:</strong> ${total}</div>
 			</div>
-			<p style="margin:16px 0 0; color:#475569; font-size: 12px;">This is a test email template. Configure SMTP settings in backend .env.</p>
+			<p style="margin:16px 0 0; color:#475569; font-size: 12px;">Thank you for choosing SmartBus.</p>
 		</div>
 	`;
 

@@ -10,6 +10,18 @@ const passengerSchema = new mongoose.Schema(
 	{ _id: false }
 );
 
+const passengerDetailSchema = new mongoose.Schema(
+  {
+    seatLabel: String,
+    name: String,
+    age: Number,
+    gender: { type: String, enum: ["male", "female", "other"] },
+    phone: String,
+    idNumber: String,
+  },
+  { _id: false }
+);
+
 const paymentSchema = new mongoose.Schema(
   {
     provider: { type: String, enum: ["esewa"], default: "esewa" },
@@ -31,6 +43,18 @@ const stopPointSchema = new mongoose.Schema(
     name: String,
     date: String,
     time: String,
+    order: Number,
+  },
+  { _id: false }
+);
+
+const seatPriceSchema = new mongoose.Schema(
+  {
+    seatLabel: { type: String, trim: true },
+    deckNumber: Number,
+    deckName: String,
+    seatType: { type: String, enum: ["SEATER", "SLEEPER", "SHARED_SLEEPER"] },
+    price: Number,
   },
   { _id: false }
 );
@@ -40,9 +64,11 @@ const bookingSchema = new mongoose.Schema(
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   schedule: { type: mongoose.Schema.Types.ObjectId, ref: "Schedule" },
   passenger: passengerSchema,
+  passengers: { type: [passengerDetailSchema], default: [] },
   boardingPoint: stopPointSchema,
   droppingPoint: stopPointSchema,
-  seats: [Number],
+  seats: [String],
+  seatPriceBreakdown: { type: [seatPriceSchema], default: [] },
   pricePerSeat: Number,
   totalPrice: Number,
   status: { type: String, enum: ["payment_pending", "confirmed", "cancelled", "payment_failed"], default: "confirmed" },
@@ -50,5 +76,18 @@ const bookingSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+bookingSchema.pre("validate", function normalizeBookingSeats(next) {
+  if (!Array.isArray(this.seats)) {
+    this.seats = [];
+    return next();
+  }
+
+  this.seats = this.seats
+    .map((seat) => String(seat || "").trim().toUpperCase().replace(/\s+/g, ""))
+    .filter(Boolean);
+
+  return next();
+});
 
 module.exports = mongoose.model("Booking", bookingSchema);

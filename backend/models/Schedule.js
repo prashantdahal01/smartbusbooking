@@ -5,6 +5,7 @@ const pointSchema = new mongoose.Schema(
 		name: String,
 		time: String,
 		date: String,
+    order: Number,
 	},
 	{ _id: false }
 );
@@ -26,11 +27,8 @@ const scheduleSchema = new mongoose.Schema({
   arrivalDate: String,
   arrivalTime: String,
   durationMinutes: Number,
-
-  // price is treated as per-seat price in the current app
-  price: Number,
-  priceMin: Number,
-  priceMax: Number,
+  price: { type: Number, min: 0, default: 0 },
+  isActive: { type: Boolean, default: true },
 
   refundable: { type: Boolean, default: false },
 

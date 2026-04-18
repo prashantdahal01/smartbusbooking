@@ -2,6 +2,7 @@
 // Used in search results listing
 import { Link } from "react-router-dom";
 import { formatCurrency, toAbsoluteAssetUrl } from "../utils/helpers";
+import { getBusTypeSummary } from "../utils/busTypeUtils";
 
 export default function BusCard({ schedule }) {
 	if (!schedule) return null;
@@ -36,7 +37,7 @@ export default function BusCard({ schedule }) {
 					</div>
 
 					<div className="mt-3 flex flex-wrap gap-2 text-xs">
-						<span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">{schedule.bus?.type || "Bus"}</span>
+						<span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">{getBusTypeSummary(schedule.bus, 2)}</span>
 						<span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">{schedule.bus?.totalSeats || 0} seats</span>
 						{schedule.route?.distance ? (
 							<span className="rounded-full bg-slate-100 px-2 py-1 font-medium text-slate-700">{schedule.route.distance} km</span>

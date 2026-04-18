@@ -23,9 +23,12 @@ app.use("/api/users", require("./routes/user.routes"));
 app.use("/api/districts", require("./routes/district.routes"));
 app.use("/api/routes", require("./routes/route.routes"));
 app.use("/api/stops", require("./routes/stop.routes"));
+app.use("/api/locations", require("./routes/location.routes"));
+app.use("/api/buses", require("./routes/bus.routes"));
 app.use("/api/schedules", require("./routes/schedule.routes"));
 app.use("/api/bookings", require("./routes/booking.routes"));
 app.use("/api/payments", require("./routes/payment.routes"));
+app.use("/api/seat-lock", require("./routes/seatLock.routes"));
 app.use("/api/operator", require("./routes/operator.routes"));
 app.use("/api/admin", require("./routes/admin.routes"));
 

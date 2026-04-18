@@ -1,20 +1,46 @@
 const mongoose = require("mongoose");
 
-const routeSchema = new mongoose.Schema({
-  source: String,
-  destination: String,
-  distance: Number,
-
-  // Ordered districts passed through for stop generation (optional).
-  // Example: ["Kathmandu", "Bhaktapur", "Kavre", "Sindhuli", "Sunsari", "Morang", "Jhapa"]
-  districtsCovered: { type: [String], default: [] },
-
-  stops: {
-    // Backwards compatible: historically stored as string[]
-    // New format supported by the UI/API: { name: string, kmFromSource?: number }
-    type: [mongoose.Schema.Types.Mixed],
-    default: [],
+const routePointSchema = new mongoose.Schema(
+  {
+    name: { type: String, trim: true },
+    time: { type: String, trim: true },
+    order: { type: Number },
   },
-});
+  { _id: false }
+);
+
+const routeSchema = new mongoose.Schema(
+  {
+    sourceCity: { type: mongoose.Schema.Types.ObjectId, ref: "City", required: true, index: true },
+    destinationCity: { type: mongoose.Schema.Types.ObjectId, ref: "City", required: true, index: true },
+    sourceDistrict: { type: String, required: true, trim: true },
+    destinationDistrict: { type: String, required: true, trim: true },
+
+    // Compatibility fields used in schedule search and legacy UI.
+    source: { type: String, required: true, trim: true },
+    destination: { type: String, required: true, trim: true },
+
+    distance: { type: Number, required: true, min: 1 },
+
+    boardingPoints: {
+      type: [routePointSchema],
+      default: [],
+    },
+
+    droppingPoints: {
+      type: [routePointSchema],
+      default: [],
+    },
+
+    // Legacy list retained for backward compatibility and migration fallback.
+    stops: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+    },
+  },
+  { timestamps: true }
+);
+
+routeSchema.index({ sourceCity: 1, destinationCity: 1 }, { unique: true });
 
 module.exports = mongoose.model("Route", routeSchema);

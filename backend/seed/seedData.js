@@ -13,6 +13,7 @@ const Route = require("../models/Route");
 const Schedule = require("../models/Schedule");
 const Booking = require("../models/Booking");
 const SeatLock = require("../models/SeatLock");
+const City = require("../models/City");
 const District = require("../models/District");
 const Stop = require("../models/Stop");
 
@@ -29,27 +30,36 @@ const seed = async () => {
 			Route.deleteMany({}),
 			Bus.deleteMany({}),
 			User.deleteMany({}),
+			City.deleteMany({}),
 			District.deleteMany({}),
 		]);
 	}
 
-	// Seed District -> Cities (minimal sample dataset; extend as needed)
-	await District.insertMany(
-		[
-			{ name: "Kathmandu", cities: ["Kalanki", "Koteshwor", "Gongabu"] },
-			{ name: "Bhaktapur", cities: ["Suryabinayak", "Thimi"] },
-			{ name: "Kavre", cities: ["Banepa", "Dhulikhel"] },
-			{ name: "Sindhuli", cities: ["Bardibas", "Sindhulimadi"] },
-			{ name: "Sunsari", cities: ["Itahari", "Dharan"] },
-			{ name: "Morang", cities: ["Biratchowk", "Belbari", "Laxminagar", "Pathari", "Urlabari"] },
-			{ name: "Jhapa", cities: ["Damak", "Birtamod", "Kakarvitta"] },
-			{ name: "Chitwan", cities: ["Narayangadh", "Sauraha"] },
-			{ name: "Pokhara", cities: ["Prithvi Chowk", "Lakeside"] },
-		],
-		{ ordered: false }
-	).catch(() => {
-		// Ignore duplicates when seed is run without clearing.
-	});
+	const districtSeedData = [
+		{ name: "Kathmandu", key: "kathmandu", cities: ["Kathmandu", "Kalanki", "Koteshwor", "Gongabu"] },
+		{ name: "Bhaktapur", key: "bhaktapur", cities: ["Suryabinayak", "Thimi"] },
+		{ name: "Kavre", key: "kavre", cities: ["Banepa", "Dhulikhel"] },
+		{ name: "Sindhuli", key: "sindhuli", cities: ["Bardibas", "Sindhulimadi"] },
+		{ name: "Sunsari", key: "sunsari", cities: ["Itahari", "Dharan"] },
+		{ name: "Morang", key: "morang", cities: ["Biratchowk", "Belbari", "Laxminagar", "Pathari", "Urlabari"] },
+		{ name: "Jhapa", key: "jhapa", cities: ["Damak", "Birtamod", "Kakarvitta"] },
+		{ name: "Chitwan", key: "chitwan", cities: ["Chitwan", "Narayangadh", "Sauraha"] },
+		{ name: "Kaski", key: "kaski", cities: ["Pokhara", "Prithvi Chowk", "Lakeside"] },
+	];
+
+	const districtDocs = new Map();
+	for (const district of districtSeedData) {
+		const districtDoc = await District.create({ name: district.name, key: district.key });
+		districtDocs.set(district.key, districtDoc);
+	}
+
+	for (const district of districtSeedData) {
+		const districtDoc = districtDocs.get(district.key);
+		for (const cityName of district.cities) {
+			const key = String(cityName || "").trim().toLowerCase();
+			await City.create({ name: cityName, key, district: districtDoc._id });
+		}
+	}
 
 	const passwordHash = await bcrypt.hash("password123", 10);
 
@@ -94,9 +104,40 @@ const seed = async () => {
 		operator: operator._id,
 	});
 
-	const route1 = await Route.create({ source: "Kathmandu", destination: "Pokhara", distance: 200 });
-	const route2 = await Route.create({ source: "Kathmandu", destination: "Chitwan", distance: 150 });
-	const route3 = await Route.create({ source: "Pokhara", destination: "Chitwan", distance: 120 });
+	const kathmanduCity = await City.findOne({ key: "kathmandu" }).populate("district");
+	const pokharaCity = await City.findOne({ key: "pokhara" }).populate("district");
+	const chitwanCity = await City.findOne({ key: "chitwan" }).populate("district");
+
+	const route1 = await Route.create({
+		sourceCity: kathmanduCity._id,
+		destinationCity: pokharaCity._id,
+		sourceDistrict: kathmanduCity.district.name,
+		destinationDistrict: pokharaCity.district.name,
+		source: kathmanduCity.name,
+		destination: pokharaCity.name,
+		distance: 200,
+		stops: [],
+	});
+	const route2 = await Route.create({
+		sourceCity: kathmanduCity._id,
+		destinationCity: chitwanCity._id,
+		sourceDistrict: kathmanduCity.district.name,
+		destinationDistrict: chitwanCity.district.name,
+		source: kathmanduCity.name,
+		destination: chitwanCity.name,
+		distance: 150,
+		stops: [],
+	});
+	const route3 = await Route.create({
+		sourceCity: pokharaCity._id,
+		destinationCity: chitwanCity._id,
+		sourceDistrict: pokharaCity.district.name,
+		destinationDistrict: chitwanCity.district.name,
+		source: pokharaCity.name,
+		destination: chitwanCity.name,
+		distance: 120,
+		stops: [],
+	});
 
 	const today = new Date();
 	const yyyy = today.getFullYear();

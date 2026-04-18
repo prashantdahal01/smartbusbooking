@@ -9,9 +9,27 @@ import {
 	getSchedules,
 	updateSchedule,
 } from "../../services/admin.service";
+import { getBusTypeSummary } from "../../utils/busTypeUtils";
 import { formatCurrency } from "../../utils/helpers";
 
 const stopKey = (s) => String(s || "").trim().toLowerCase();
+
+const normalizeStopType = (value) => {
+	const type = String(value || "pickup").trim().toLowerCase();
+	if (type === "drop") return "drop";
+	if (type === "both") return "both";
+	return "pickup";
+};
+
+const stopTypeAllowsBoarding = (value) => {
+	const type = normalizeStopType(value);
+	return type === "pickup" || type === "both";
+};
+
+const stopTypeAllowsDropping = (value) => {
+	const type = normalizeStopType(value);
+	return type === "drop" || type === "both";
+};
 
 const toStopName = (raw) => {
 	if (raw === null || raw === undefined) return "";
@@ -72,20 +90,49 @@ const normalizeStringList = (items) => {
 	return [...new Set(raw)];
 };
 
+const getScheduleFareSummary = (schedule) => {
+	const legacyPrice = Number(schedule?.price);
+	if (Number.isFinite(legacyPrice) && legacyPrice >= 0) return formatCurrency(legacyPrice);
+
+	const prices = (Array.isArray(schedule?.bus?.decks) ? schedule.bus.decks : [])
+		.flatMap((deck) => (Array.isArray(deck?.seats) ? deck.seats : []))
+		.map((seat) => Number(seat?.price))
+		.filter((price) => Number.isFinite(price) && price >= 0);
+
+	if (prices.length === 0) return "Defined in bus layout";
+
+	const min = Math.min(...prices);
+	const max = Math.max(...prices);
+	if (min === max) return formatCurrency(min);
+	return `${formatCurrency(min)} - ${formatCurrency(max)}`;
+};
+
+const pointIdentity = (point) => {
+	const stopId = String(point?.stopId || "").trim();
+	if (stopId) return `id:${stopId}`;
+	return `name:${stopKey(point?.name)}`;
+};
+
 const sanitizePoints = (points) => {
 	const arr = Array.isArray(points) ? points : [];
 	const seen = new Set();
 	const out = [];
 	arr.forEach((p) => {
 		const name = String(p?.name || "").trim();
-		if (!name) return;
-		const k = name.toLowerCase();
+		const stopId = String(p?.stopId || "").trim();
+		const rawOrder = Number(p?.order);
+		const order = Number.isFinite(rawOrder) && rawOrder > 0 ? Math.trunc(rawOrder) : undefined;
+		if (!name && !stopId) return;
+		const k = pointIdentity({ name, stopId });
 		if (seen.has(k)) return;
 		seen.add(k);
 		out.push({
+			stopId,
 			name,
 			time: String(p?.time || "").trim(),
 			date: String(p?.date || "").trim(),
+			...(Number.isFinite(order) ? { order } : {}),
+			_auto: Boolean(p?._auto),
 		});
 	});
 	return out;
@@ -97,16 +144,57 @@ const toggleValue = (list, value) => {
 	return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 };
 
-const togglePointByName = (points, name, defaults = {}) => {
-	const n = String(name || "").trim();
-	if (!n) return points;
-	const key = n.toLowerCase();
-	const exists = points.some((p) => String(p?.name || "").trim().toLowerCase() === key);
-	if (exists) return points.filter((p) => String(p?.name || "").trim().toLowerCase() !== key);
+const formatTemplateTimeLabel = (template) => {
+	if (!template) return "";
+	if (template.absoluteTime) return `Time ${template.absoluteTime}`;
+	if (template.offsetMinutes !== null && template.offsetMinutes !== undefined && template.offsetMinutes !== "") {
+		return `T+${template.offsetMinutes} min`;
+	}
+	return "";
+};
+
+const groupStopOptionsByDistrict = (options) => {
+	const map = new Map();
+	options.forEach((option) => {
+		const district = String(option?.district || "Other").trim() || "Other";
+		if (!map.has(district)) map.set(district, []);
+		map.get(district).push(option);
+	});
+
+	return Array.from(map.entries())
+		.map(([district, stops]) => ({
+			district,
+			stops: [...stops].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name)),
+		}))
+		.sort((a, b) => a.district.localeCompare(b.district));
+};
+
+const togglePointByStop = (points, stopOption, defaults = {}) => {
+	const stopId = String(stopOption?.stopId || "").trim();
+	const name = String(stopOption?.name || "").trim();
+	if (!stopId && !name) return points;
+
+	const key = pointIdentity({ stopId, name });
+	const exists = points.some((p) => pointIdentity(p) === key);
+	if (exists) return points.filter((p) => pointIdentity(p) !== key);
+
 	const nextDate = String(defaults?.date || "").trim();
 	const nextTime = String(defaults?.time || "").trim();
 	const isAuto = Boolean(defaults?._auto);
-	return [...points, { name: n, time: nextTime, date: nextDate, _auto: isAuto }];
+
+	return [
+		...points,
+		{
+			stopId,
+			name,
+			time: nextTime,
+			date: nextDate,
+			order: Number.isFinite(Number(stopOption?.order)) && Number(stopOption.order) > 0
+				? Math.trunc(Number(stopOption.order))
+				: undefined,
+			_auto: isAuto,
+		},
+	];
 };
 
 export default function ManageSchedules() {
@@ -128,9 +216,6 @@ export default function ManageSchedules() {
 	const [arrivalDate, setArrivalDate] = useState("");
 	const [arrivalTime, setArrivalTime] = useState("");
 	const [durationHours, setDurationHours] = useState("");
-	const [price, setPrice] = useState("");
-	const [priceMin, setPriceMin] = useState("");
-	const [priceMax, setPriceMax] = useState("");
 	const [refundable, setRefundable] = useState(false);
 	const [features, setFeatures] = useState([]);
 	const [amenities, setAmenities] = useState([]);
@@ -138,11 +223,24 @@ export default function ManageSchedules() {
 	const [refundPolicy, setRefundPolicy] = useState("");
 	const [cancellationPolicy, setCancellationPolicy] = useState("");
 	const [dateChangePolicy, setDateChangePolicy] = useState("");
+	const [luggagePolicy, setLuggagePolicy] = useState("");
 	const [boardingPoints, setBoardingPoints] = useState([]);
 	const [droppingPoints, setDroppingPoints] = useState([]);
 	const [routeStopDocs, setRouteStopDocs] = useState([]);
 
 	const selectedRoute = useMemo(() => routes.find((r) => r._id === routeId) || null, [routes, routeId]);
+	const selectedBus = useMemo(() => buses.find((b) => String(b?._id) === String(busId)) || null, [buses, busId]);
+	const selectedBusHasPolicies = useMemo(() => {
+		if (!selectedBus) return false;
+		const policies = selectedBus?.policies || {};
+		return [
+			policies?.refundPolicy,
+			policies?.cancellationPolicy,
+			policies?.dateChangePolicy,
+			policies?.luggagePolicy,
+		].some((value) => String(value || "").trim());
+	}, [selectedBus]);
+	const showBusPolicyLoadedHint = !isEditing && Boolean(selectedBus);
 	const prevRouteIdRef = useRef("");
 
 	useEffect(() => {
@@ -174,120 +272,98 @@ export default function ManageSchedules() {
 			cancelled = true;
 		};
 	}, [routeId, isEditing]);
-	const stopOptions = useMemo(() => {
-		if (!selectedRoute) return [];
-		const midsRaw = Array.isArray(selectedRoute.stops) ? selectedRoute.stops : [];
-		const mids = midsRaw.map((s) => String(toStopName(s) || "").trim()).filter(Boolean);
-		const list = [selectedRoute.source, ...mids, selectedRoute.destination]
-			.map((s) => String(s || "").trim())
-			.filter(Boolean);
-		const seen = new Set();
-		const out = [];
-		list.forEach((s) => {
-			const k = s.toLowerCase();
-			if (seen.has(k)) return;
-			seen.add(k);
-			out.push(s);
-		});
-		return out;
-	}, [selectedRoute]);
+	const routeStopEntries = useMemo(() => {
+		const rows = (Array.isArray(routeStopDocs) ? routeStopDocs : [])
+			.map((doc, index) => {
+				const name = String(doc?.cityName || doc?.cityRef?.name || doc?.city || "").trim();
+				const cityKey = stopKey(doc?.cityKey || name);
+				if (!name || !cityKey) return null;
 
-	const hasStopTemplates = useMemo(() => Array.isArray(routeStopDocs) && routeStopDocs.length > 0, [routeStopDocs]);
+				const orderRaw = Number(doc?.order);
+				const order = Number.isFinite(orderRaw) && Number.isInteger(orderRaw) && orderRaw > 0 ? orderRaw : index + 1;
 
-	const stopDocByKey = useMemo(() => {
-		const map = new Map();
-		(Array.isArray(routeStopDocs) ? routeStopDocs : []).forEach((s) => {
-			const name = String(s?.city || "").trim();
-			const k = stopKey(name);
-			if (!k) return;
-			map.set(k, s);
-		});
-		return map;
+				const offsetRaw = doc?.offsetMinutes;
+				const offsetMinutes =
+					offsetRaw !== undefined && offsetRaw !== null && offsetRaw !== "" && Number.isFinite(Number(offsetRaw))
+						? Number(offsetRaw)
+						: null;
+
+				return {
+					stopId: String(doc?._id || "").trim(),
+					name,
+					cityKey,
+					district: String(doc?.district || doc?.districtName || "Other").trim() || "Other",
+					type: normalizeStopType(doc?.type),
+					order,
+					absoluteTime: String(doc?.absoluteTime || "").trim(),
+					offsetMinutes,
+				};
+			})
+			.filter(Boolean)
+			.sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+
+		return rows;
 	}, [routeStopDocs]);
 
-	const boardingBaseOptions = useMemo(() => {
-		if (!selectedRoute) return [];
-		if (!hasStopTemplates) return stopOptions;
-		const srcKey = stopKey(selectedRoute.source);
-		return stopOptions.filter((name) => {
-			const k = stopKey(name);
-			if (!k) return false;
-			if (k === srcKey) return true;
-			const doc = stopDocByKey.get(k);
-			const t = String(doc?.type || "").trim().toLowerCase();
-			return t === "pickup" || t === "both";
+	const boardingPointOptions = useMemo(
+		() => routeStopEntries.filter((entry) => stopTypeAllowsBoarding(entry.type)),
+		[routeStopEntries]
+	);
+
+	const droppingPointOptions = useMemo(
+		() => routeStopEntries.filter((entry) => stopTypeAllowsDropping(entry.type)),
+		[routeStopEntries]
+	);
+
+	const groupedBoardingPointOptions = useMemo(
+		() => groupStopOptionsByDistrict(boardingPointOptions),
+		[boardingPointOptions]
+	);
+
+	const groupedDroppingPointOptions = useMemo(
+		() => groupStopOptionsByDistrict(droppingPointOptions),
+		[droppingPointOptions]
+	);
+
+	const boardingOptionByIdentity = useMemo(() => {
+		const map = new Map();
+		boardingPointOptions.forEach((option) => {
+			map.set(pointIdentity(option), option);
+			map.set(`name:${option.cityKey}`, option);
 		});
-	}, [hasStopTemplates, selectedRoute, stopDocByKey, stopOptions]);
+		return map;
+	}, [boardingPointOptions]);
 
-	const droppingBaseOptions = useMemo(() => {
-		if (!selectedRoute) return [];
-		if (!hasStopTemplates) return stopOptions;
-		const dstKey = stopKey(selectedRoute.destination);
-		return stopOptions.filter((name) => {
-			const k = stopKey(name);
-			if (!k) return false;
-			if (k === dstKey) return true;
-			const doc = stopDocByKey.get(k);
-			const t = String(doc?.type || "").trim().toLowerCase();
-			return t === "drop" || t === "both";
+	const droppingOptionByIdentity = useMemo(() => {
+		const map = new Map();
+		droppingPointOptions.forEach((option) => {
+			map.set(pointIdentity(option), option);
+			map.set(`name:${option.cityKey}`, option);
 		});
-	}, [hasStopTemplates, selectedRoute, stopDocByKey, stopOptions]);
-
-	const boardingPointOptions = useMemo(() => {
-		const base = boardingBaseOptions;
-		const baseKeys = new Set(base.map((s) => stopKey(s)));
-		const extras = (Array.isArray(boardingPoints) ? boardingPoints : [])
-			.map((p) => String(p?.name || "").trim())
-			.filter(Boolean)
-			.filter((n) => !baseKeys.has(stopKey(n)));
-		return [...base, ...extras];
-	}, [boardingBaseOptions, boardingPoints]);
-
-	const droppingPointOptions = useMemo(() => {
-		const base = droppingBaseOptions;
-		const baseKeys = new Set(base.map((s) => stopKey(s)));
-		const extras = (Array.isArray(droppingPoints) ? droppingPoints : [])
-			.map((p) => String(p?.name || "").trim())
-			.filter(Boolean)
-			.filter((n) => !baseKeys.has(stopKey(n)));
-		return [...base, ...extras];
-	}, [droppingBaseOptions, droppingPoints]);
+		return map;
+	}, [droppingPointOptions]);
 
 	const stopKmByKey = useMemo(() => {
 		const map = new Map();
 		if (!selectedRoute) return map;
+
 		const totalKm = Number(selectedRoute.distance);
 		if (!Number.isFinite(totalKm) || totalKm <= 0) return map;
 
-		const srcName = String(selectedRoute.source || "").trim();
-		const dstName = String(selectedRoute.destination || "").trim();
-		if (srcName) map.set(stopKey(srcName), 0);
-		if (dstName) map.set(stopKey(dstName), totalKm);
-
-		const midsRaw = Array.isArray(selectedRoute.stops) ? selectedRoute.stops : [];
-		midsRaw.forEach((raw) => {
+		const routeStops = Array.isArray(selectedRoute.stops) ? selectedRoute.stops : [];
+		routeStops.forEach((raw) => {
 			const name = String(toStopName(raw) || "").trim();
 			if (!name) return;
-			const k = stopKey(name);
-			if (!k) return;
-			if (k === stopKey(srcName) || k === stopKey(dstName)) return;
+			const key = stopKey(name);
+			if (!key) return;
 			const kmRaw = toStopKmFromSource(raw);
 			const km = kmRaw !== undefined && kmRaw !== null && kmRaw !== "" ? Number(kmRaw) : NaN;
 			if (!Number.isFinite(km)) return;
-			map.set(k, Math.max(0, Math.min(totalKm, km)));
+			map.set(key, Math.max(0, Math.min(totalKm, km)));
 		});
 
-		// Fill any missing stops by index-based spacing.
-		if (Array.isArray(stopOptions) && stopOptions.length > 1) {
-			stopOptions.forEach((name, idx) => {
-				const k = stopKey(name);
-				if (!k || map.has(k)) return;
-				map.set(k, (idx / (stopOptions.length - 1)) * totalKm);
-			});
-		}
-
 		return map;
-	}, [selectedRoute, stopOptions]);
+	}, [selectedRoute]);
 
 	const departureMs = useMemo(() => parseIsoDateTimeMs(date, time), [date, time]);
 	const arrivalMs = useMemo(() => {
@@ -315,143 +391,97 @@ export default function ManageSchedules() {
 
 	const autoPointByKey = useMemo(() => {
 		const map = new Map();
-		if (!selectedRoute) return map;
 		if (!Number.isFinite(departureMs)) return map;
 
 		const baseDate = String(date || "").trim();
-		const srcName = String(selectedRoute.source || "").trim();
-		const dstName = String(selectedRoute.destination || "").trim();
-		const srcKey = stopKey(srcName);
-		const dstKey = stopKey(dstName);
-
-		// Source is always the schedule departure time.
-		if (srcKey) {
-			map.set(srcKey, { date: formatLocalDate(departureMs), time: formatLocalTime(departureMs) });
-		}
+		if (!baseDate || routeStopEntries.length === 0) return map;
 
 		const isValidHHmm = (s) => /^\d{2}:\d{2}$/.test(String(s || "").trim());
 
-		// 1) Stop template timing overrides interpolation.
-		stopOptions.forEach((name) => {
-			const k = stopKey(name);
-			if (!k || k === srcKey) return;
-
-			const doc = stopDocByKey.get(k);
-			if (!doc) return;
-
-			const abs = String(doc?.absoluteTime !== undefined ? doc.absoluteTime : doc?.time || "").trim();
+		routeStopEntries.forEach((entry) => {
+			const key = pointIdentity({ stopId: entry.stopId, name: entry.name });
+			const abs = String(entry?.absoluteTime || "").trim();
 			if (abs && isValidHHmm(abs)) {
 				const parsed = parseIsoDateTimeMs(baseDate, abs);
 				if (!Number.isFinite(parsed)) return;
 				let ms = parsed;
 				while (ms < departureMs) ms += 24 * 60 * 60 * 1000;
-				map.set(k, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
+				map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
 				return;
 			}
 
-			const offsetRaw =
-				doc?.offsetMinutes !== undefined && doc?.offsetMinutes !== null
-					? doc.offsetMinutes
-					: doc?.offset !== undefined && doc?.offset !== null
-						? doc.offset
-						: null;
-
-			if (offsetRaw === null || offsetRaw === undefined || offsetRaw === "") return;
-			const offset = Number(offsetRaw);
+			const offset = Number(entry?.offsetMinutes);
 			if (!Number.isFinite(offset) || offset < 0) return;
 			const ms = departureMs + Math.round(offset) * 60 * 1000;
-			map.set(k, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
+			map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
 		});
 
-		// 2) Interpolation fallback (only if arrival/duration is known).
 		if (Number.isFinite(arrivalMs) && arrivalMs > departureMs) {
 			const totalKm = Number(selectedRoute.distance);
 			if (Number.isFinite(totalKm) && totalKm > 0) {
-				stopOptions.forEach((name) => {
-					const k = stopKey(name);
-					if (!k || map.has(k)) return;
-					const km = stopKmByKey.get(k);
+				routeStopEntries.forEach((entry) => {
+					const key = pointIdentity({ stopId: entry.stopId, name: entry.name });
+					if (map.has(key)) return;
+					const km = stopKmByKey.get(entry.cityKey);
 					if (!Number.isFinite(km)) return;
 					const frac = totalKm > 0 ? km / totalKm : 0;
 					const ms = departureMs + Math.round(frac * (arrivalMs - departureMs));
-					map.set(k, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
+					map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
 				});
-			}
-
-			// Ensure destination gets a value when arrival is set.
-			if (dstKey && !map.has(dstKey)) {
-				map.set(dstKey, { date: formatLocalDate(arrivalMs), time: formatLocalTime(arrivalMs) });
 			}
 		}
 
 		return map;
-	}, [arrivalMs, date, departureMs, selectedRoute, stopDocByKey, stopKmByKey, stopOptions]);
+	}, [arrivalMs, date, departureMs, routeStopEntries, selectedRoute, stopKmByKey]);
 
 	const stopIndexByKey = useMemo(() => {
 		const map = new Map();
-		stopOptions.forEach((s, idx) => {
-			const k = String(s || "").trim().toLowerCase();
-			if (!k) return;
-			if (!map.has(k)) map.set(k, idx);
+		routeStopEntries.forEach((entry, idx) => {
+			const idKey = pointIdentity({ stopId: entry.stopId, name: entry.name });
+			if (!map.has(idKey)) map.set(idKey, idx);
+			const nameKey = `name:${entry.cityKey}`;
+			if (!map.has(nameKey)) map.set(nameKey, idx);
 		});
 		return map;
-	}, [stopOptions]);
+	}, [routeStopEntries]);
+
+	const pointSortIndex = (point) => {
+		const identity = pointIdentity(point);
+		if (stopIndexByKey.has(identity)) return stopIndexByKey.get(identity);
+		return stopIndexByKey.get(`name:${stopKey(point?.name)}`) ?? Number.POSITIVE_INFINITY;
+	};
 
 	useEffect(() => {
-		if (!selectedRoute) return;
-		if (isEditing) return;
-		if (!hasStopTemplates) return;
-		if ((Array.isArray(boardingPoints) && boardingPoints.length > 0) || (Array.isArray(droppingPoints) && droppingPoints.length > 0)) return;
+		if (!routeStopEntries.length) return;
 
-		const src = String(selectedRoute.source || "").trim();
-		const dst = String(selectedRoute.destination || "").trim();
+		const withMappedStopIds = (prev) =>
+			(Array.isArray(prev) ? prev : []).map((point) => {
+				const existingId = String(point?.stopId || "").trim();
+				if (existingId && routeStopEntries.some((entry) => String(entry.stopId) === existingId)) {
+					return point;
+				}
 
-		const pick = [];
-		const drop = [];
-		if (src) pick.push(src);
-		if (dst) drop.push(dst);
+				const nameKey = stopKey(point?.name);
+				if (!nameKey) return point;
+				const matched = routeStopEntries.find((entry) => entry.cityKey === nameKey);
+				if (!matched) return point;
 
-		(Array.isArray(routeStopDocs) ? routeStopDocs : []).forEach((s) => {
-			const name = String(s?.city || "").trim();
-			if (!name) return;
-			const t = String(s?.type || "").trim().toLowerCase();
-			if (t === "pickup" || t === "both") pick.push(name);
-			if (t === "drop" || t === "both") drop.push(name);
-		});
-
-		const uniq = (arr) => {
-			const out = [];
-			const seen = new Set();
-			arr.forEach((n) => {
-				const k = stopKey(n);
-				if (!k || seen.has(k)) return;
-				seen.add(k);
-				out.push(n);
+				return {
+					...point,
+					stopId: matched.stopId,
+					name: matched.name,
+				};
 			});
-			return out;
-		};
 
-		const toPoint = (name) => {
-			const auto = autoPointByKey.get(stopKey(name));
-			return { name, date: auto?.date || "", time: auto?.time || "", _auto: true };
-		};
-
-		const nextBoarding = uniq(pick)
-			.filter((n) => stopIndexByKey.has(stopKey(n)))
-			.map(toPoint);
-		const nextDropping = uniq(drop)
-			.filter((n) => stopIndexByKey.has(stopKey(n)))
-			.map(toPoint);
-
-		if (nextBoarding.length > 0) setBoardingPoints(nextBoarding);
-		if (nextDropping.length > 0) setDroppingPoints(nextDropping);
-	}, [autoPointByKey, boardingPoints, droppingPoints, hasStopTemplates, isEditing, routeStopDocs, selectedRoute, stopIndexByKey]);
+		setBoardingPoints(withMappedStopIds);
+		setDroppingPoints(withMappedStopIds);
+	}, [routeStopEntries]);
 
 	const sortedBoardingPoints = useMemo(() => {
 		const arr = Array.isArray(boardingPoints) ? boardingPoints : [];
 		return [...arr].sort((a, b) => {
-			const ai = stopIndexByKey.get(stopKey(a?.name)) ?? Number.POSITIVE_INFINITY;
-			const bi = stopIndexByKey.get(stopKey(b?.name)) ?? Number.POSITIVE_INFINITY;
+			const ai = pointSortIndex(a);
+			const bi = pointSortIndex(b);
 			if (ai !== bi) return ai - bi;
 			return String(a?.name || "").localeCompare(String(b?.name || ""));
 		});
@@ -460,18 +490,18 @@ export default function ManageSchedules() {
 	const sortedDroppingPoints = useMemo(() => {
 		const arr = Array.isArray(droppingPoints) ? droppingPoints : [];
 		return [...arr].sort((a, b) => {
-			const ai = stopIndexByKey.get(stopKey(a?.name)) ?? Number.POSITIVE_INFINITY;
-			const bi = stopIndexByKey.get(stopKey(b?.name)) ?? Number.POSITIVE_INFINITY;
+			const ai = pointSortIndex(a);
+			const bi = pointSortIndex(b);
 			if (ai !== bi) return ai - bi;
 			return String(a?.name || "").localeCompare(String(b?.name || ""));
 		});
 	}, [droppingPoints, stopIndexByKey]);
 
-	const updatePointField = (setter, name, field, value) => {
-		const nKey = String(name || "").trim().toLowerCase();
+	const updatePointField = (setter, point, field, value) => {
+		const key = pointIdentity(point);
 		setter((prev) =>
 			(Array.isArray(prev) ? prev : []).map((p) =>
-				String(p?.name || "").trim().toLowerCase() === nKey ? { ...p, [field]: value, _auto: false } : p
+				pointIdentity(p) === key ? { ...p, [field]: value, _auto: false } : p
 			)
 		);
 	};
@@ -481,7 +511,7 @@ export default function ManageSchedules() {
 		const applyAuto = (prev) =>
 			(Array.isArray(prev) ? prev : []).map((p) => {
 				if (!p?._auto) return p;
-				const auto = autoPointByKey.get(stopKey(p?.name));
+				const auto = autoPointByKey.get(pointIdentity(p));
 				if (!auto) return p;
 				return { ...p, date: auto.date, time: auto.time };
 			});
@@ -517,15 +547,13 @@ export default function ManageSchedules() {
 		setArrivalDate("");
 		setArrivalTime("");
 		setDurationHours("");
-		setPrice("");
-		setPriceMin("");
-		setPriceMax("");
 		setRefundable(false);
 		setFeatures([]);
 		setAmenities([]);
 		setRefundPolicy("");
 		setCancellationPolicy("");
 		setDateChangePolicy("");
+		setLuggagePolicy("");
 		setBoardingPoints([]);
 		setDroppingPoints([]);
 	};
@@ -549,11 +577,33 @@ export default function ManageSchedules() {
 		loadAll();
 	}, []);
 
+	useEffect(() => {
+		if (isEditing) return;
+
+		if (!selectedBus) {
+			setRefundPolicy("");
+			setCancellationPolicy("");
+			setDateChangePolicy("");
+			setLuggagePolicy("");
+			return;
+		}
+
+		const policies = selectedBus?.policies || {};
+		setRefundPolicy(String(policies?.refundPolicy || ""));
+		setCancellationPolicy(String(policies?.cancellationPolicy || ""));
+		setDateChangePolicy(String(policies?.dateChangePolicy || ""));
+		setLuggagePolicy(String(policies?.luggagePolicy || ""));
+	}, [selectedBus, isEditing]);
+
 	const onSubmit = async (e) => {
 		e.preventDefault();
 		setError("");
 		setActionLoading(true);
 		try {
+			if (!selectedRoute || routeStopEntries.length === 0) {
+				throw new Error("No route stops found. Configure stops in Stop Management before creating schedule.");
+			}
+
 			let durationMinutesValue;
 			if (durationHours !== "") {
 				const hours = Number(durationHours);
@@ -569,6 +619,23 @@ export default function ManageSchedules() {
 			if (nextDroppingPoints.length === 0) {
 				throw new Error("Select at least one dropping point");
 			}
+
+			const resolveOptionForPoint = (point, lookupMap) => {
+				const direct = lookupMap.get(pointIdentity(point));
+				if (direct) return direct;
+				return lookupMap.get(`name:${stopKey(point?.name)}`);
+			};
+
+			const validateLanePoints = (points, label, lookupMap) => {
+				const invalid = points.find((point) => !resolveOptionForPoint(point, lookupMap));
+				if (invalid) {
+					throw new Error(`${label} point is not valid for selected route: ${invalid?.name || "Unknown"}`);
+				}
+			};
+
+			validateLanePoints(nextBoardingPoints, "Boarding", boardingOptionByIdentity);
+			validateLanePoints(nextDroppingPoints, "Dropping", droppingOptionByIdentity);
+
 			const missingBoarding = nextBoardingPoints.find((p) => !String(p?.date || "").trim() || !String(p?.time || "").trim());
 			if (missingBoarding) {
 				throw new Error(`Boarding point time is required for: ${missingBoarding.name}`);
@@ -587,8 +654,8 @@ export default function ManageSchedules() {
 				return new Date(`${d}T${t}:00`).getTime();
 			};
 			const validateSeq = (points, label) => {
-				const enriched = points.map((p) => ({ ...p, idx: stopIndexByKey.get(stopKey(p?.name)) }));
-				const unknown = enriched.find((p) => p.idx === undefined);
+				const enriched = points.map((p) => ({ ...p, idx: pointSortIndex(p) }));
+				const unknown = enriched.find((p) => !Number.isFinite(p.idx));
 				if (unknown) throw new Error(`${label} point not found in route stops: ${unknown.name}`);
 				enriched.sort((a, b) => a.idx - b.idx);
 				let prev = null;
@@ -602,6 +669,28 @@ export default function ManageSchedules() {
 			validateSeq(nextBoardingPoints, "Boarding");
 			validateSeq(nextDroppingPoints, "Dropping");
 
+			const toPayloadPoint = (point, lookupMap) => {
+				const option = resolveOptionForPoint(point, lookupMap);
+				const optionOrder = Number(option?.order);
+				const pointOrder = Number(point?.order);
+				const order = Number.isFinite(optionOrder) && optionOrder > 0
+					? Math.trunc(optionOrder)
+					: Number.isFinite(pointOrder) && pointOrder > 0
+						? Math.trunc(pointOrder)
+						: undefined;
+
+				return {
+					stopId: String(option?.stopId || point?.stopId || "").trim() || undefined,
+					name: String(option?.name || point?.name || "").trim(),
+					date: String(point?.date || "").trim(),
+					time: String(point?.time || "").trim(),
+					...(Number.isFinite(order) ? { order } : {}),
+				};
+			};
+
+			const payloadBoardingPoints = nextBoardingPoints.map((point) => toPayloadPoint(point, boardingOptionByIdentity));
+			const payloadDroppingPoints = nextDroppingPoints.map((point) => toPayloadPoint(point, droppingOptionByIdentity));
+
 			const payload = {
 				bus: busId,
 				route: routeId,
@@ -610,9 +699,6 @@ export default function ManageSchedules() {
 				arrivalDate: arrivalDate || undefined,
 				arrivalTime: arrivalTime || undefined,
 				durationMinutes: durationMinutesValue,
-				price: price !== "" ? Number(price) : undefined,
-				priceMin: priceMin !== "" ? Number(priceMin) : undefined,
-				priceMax: priceMax !== "" ? Number(priceMax) : undefined,
 				refundable: Boolean(refundable),
 				features: normalizeStringList(features),
 				amenities: normalizeStringList(amenities),
@@ -620,9 +706,10 @@ export default function ManageSchedules() {
 					refundPolicy: refundPolicy || "",
 					cancellationPolicy: cancellationPolicy || "",
 					dateChangePolicy: dateChangePolicy || "",
+					luggagePolicy: luggagePolicy || "",
 				},
-				boardingPoints: nextBoardingPoints,
-				droppingPoints: nextDroppingPoints,
+				boardingPoints: payloadBoardingPoints,
+				droppingPoints: payloadDroppingPoints,
 			};
 
 			if (!payload.bus || !payload.route || !payload.date || !payload.time) {
@@ -658,9 +745,6 @@ export default function ManageSchedules() {
 		} else {
 			setDurationHours("");
 		}
-		setPrice(sch.price ?? "");
-		setPriceMin(sch.priceMin ?? "");
-		setPriceMax(sch.priceMax ?? "");
 		setRefundable(Boolean(sch.refundable));
 		setFeatures(normalizeStringList(sch.features));
 		setAmenities(normalizeStringList(sch.amenities));
@@ -668,6 +752,7 @@ export default function ManageSchedules() {
 		setRefundPolicy(sch.policies?.refundPolicy || "");
 		setCancellationPolicy(sch.policies?.cancellationPolicy || "");
 		setDateChangePolicy(sch.policies?.dateChangePolicy || "");
+		setLuggagePolicy(sch.policies?.luggagePolicy || "");
 		setBoardingPoints(sanitizePoints(sch.boardingPoints));
 		setDroppingPoints(sanitizePoints(sch.droppingPoints));
 	};
@@ -738,7 +823,7 @@ export default function ManageSchedules() {
 										<option value="">Select bus</option>
 										{buses.map((b) => (
 											<option key={b._id} value={b._id}>
-												{b.name} ({b.type || "Bus"})
+												{b.name} ({getBusTypeSummary(b, 2)})
 											</option>
 										))}
 									</select>
@@ -834,40 +919,9 @@ export default function ManageSchedules() {
 							</div>
 
 							<div className="grid gap-4 lg:grid-cols-3">
-								<div>
-									<label className="block text-sm font-medium text-slate-700">Price per seat</label>
-									<input
-										type="number"
-										min={0}
-										value={price}
-										onChange={(e) => setPrice(e.target.value)}
-										required
-										placeholder="e.g., 599"
-										className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-									/>
-								</div>
-								<div>
-									<label className="block text-sm font-medium text-slate-700">Price min (optional)</label>
-									<input
-										type="number"
-										min={0}
-										value={priceMin}
-										onChange={(e) => setPriceMin(e.target.value)}
-										placeholder="e.g., 499"
-										className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-									/>
-								</div>
-								<div>
-									<label className="block text-sm font-medium text-slate-700">Price max (optional)</label>
-									<input
-										type="number"
-										min={0}
-										value={priceMax}
-										onChange={(e) => setPriceMax(e.target.value)}
-										placeholder="e.g., 899"
-										className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-									/>
-								</div>
+										<div className="lg:col-span-3 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+											Seat pricing is managed in Bus Layout and applied automatically during booking.
+										</div>
 							</div>
 
 							<div className="rounded-2xl border border-slate-100 bg-slate-50 p-5">
@@ -911,25 +965,43 @@ export default function ManageSchedules() {
 
 									<div className="rounded-xl border border-slate-100 bg-white p-4">
 										<div className="text-xs font-semibold text-slate-600">Boarding points</div>
-										{boardingPointOptions.length === 0 ? (
-											<div className="mt-3 text-xs text-slate-500">Select a route to see stop options.</div>
+										{groupedBoardingPointOptions.length === 0 ? (
+											<div className="mt-3 text-xs text-slate-500">Select a route with pickup stops to see options.</div>
 										) : (
-											<div className="mt-3 grid gap-2 sm:grid-cols-2">
-												{boardingPointOptions.map((name) => (
-													<label key={name} className="inline-flex select-none items-center gap-2 text-sm text-slate-700">
-														<input
-															type="checkbox"
-															checked={boardingPoints.some((p) => String(p?.name || "").trim().toLowerCase() === String(name).trim().toLowerCase())}
-															onChange={() =>
-															setBoardingPoints((prev) => {
-																const auto = autoPointByKey.get(stopKey(name));
-																return togglePointByName(prev, name, auto ? { ...auto, _auto: true } : { date, time, _auto: false });
-															})
-														}
-															className="h-4 w-4 rounded border-slate-300 text-orange-500"
-														/>
-														{name}
-													</label>
+											<div className="mt-3 space-y-3">
+												{groupedBoardingPointOptions.map((group) => (
+													<div key={`boarding-${group.district}`} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+														<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">{group.district}</div>
+														<div className="grid gap-2 sm:grid-cols-2">
+															{group.stops.map((option) => {
+																const optionKey = pointIdentity(option);
+																const checked = boardingPoints.some(
+																	(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
+																);
+																const templateLabel = formatTemplateTimeLabel(option);
+
+																return (
+																	<label key={optionKey} className="inline-flex select-none items-start gap-2 text-sm text-slate-700">
+																		<input
+																			type="checkbox"
+																			checked={checked}
+																			onChange={() =>
+																			setBoardingPoints((prev) => {
+																				const auto = autoPointByKey.get(optionKey);
+																				return togglePointByStop(prev, option, auto ? { ...auto, _auto: true } : { date, time, _auto: false });
+																			})
+																		}
+																		className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
+																	/>
+																		<span>
+																			<span className="block">{option.name}</span>
+																			{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
+																		</span>
+																	</label>
+																);
+															})}
+														</div>
+													</div>
 												))}
 											</div>
 										)}
@@ -938,7 +1010,7 @@ export default function ManageSchedules() {
 											<div className="mt-4 space-y-3">
 												<div className="text-xs font-semibold text-slate-600">Pickup times</div>
 												{sortedBoardingPoints.map((p) => (
-													<div key={p.name} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+													<div key={pointIdentity(p)} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
 														<div className="text-sm font-semibold text-slate-800">{p.name}</div>
 														<div className="mt-2 grid gap-3 sm:grid-cols-2">
 															<div>
@@ -946,7 +1018,7 @@ export default function ManageSchedules() {
 																<input
 																	type="date"
 																	value={p.date || ""}
-																	onChange={(e) => updatePointField(setBoardingPoints, p.name, "date", e.target.value)}
+																	onChange={(e) => updatePointField(setBoardingPoints, p, "date", e.target.value)}
 																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
 																/>
 															</div>
@@ -955,7 +1027,7 @@ export default function ManageSchedules() {
 																<input
 																	type="time"
 																	value={p.time || ""}
-																	onChange={(e) => updatePointField(setBoardingPoints, p.name, "time", e.target.value)}
+																	onChange={(e) => updatePointField(setBoardingPoints, p, "time", e.target.value)}
 																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
 																/>
 															</div>
@@ -968,29 +1040,49 @@ export default function ManageSchedules() {
 
 									<div className="rounded-xl border border-slate-100 bg-white p-4">
 										<div className="text-xs font-semibold text-slate-600">Dropping points</div>
-										{droppingPointOptions.length === 0 ? (
-											<div className="mt-3 text-xs text-slate-500">Select a route to see stop options.</div>
+										{groupedDroppingPointOptions.length === 0 ? (
+											<div className="mt-3 text-xs text-slate-500">Select a route with dropping stops to see options.</div>
 										) : (
-											<div className="mt-3 grid gap-2 sm:grid-cols-2">
-												{droppingPointOptions.map((name) => (
-													<label key={name} className="inline-flex select-none items-center gap-2 text-sm text-slate-700">
-														<input
-															type="checkbox"
-															checked={droppingPoints.some((p) => String(p?.name || "").trim().toLowerCase() === String(name).trim().toLowerCase())}
-															onChange={() =>
-															setDroppingPoints((prev) => {
-																const auto = autoPointByKey.get(stopKey(name));
-																return togglePointByName(
-																	prev,
-																	name,
-																	auto ? { ...auto, _auto: true } : { date: arrivalDate || date, time: arrivalTime, _auto: false }
+											<div className="mt-3 space-y-3">
+												{groupedDroppingPointOptions.map((group) => (
+													<div key={`dropping-${group.district}`} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+														<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">{group.district}</div>
+														<div className="grid gap-2 sm:grid-cols-2">
+															{group.stops.map((option) => {
+																const optionKey = pointIdentity(option);
+																const checked = droppingPoints.some(
+																	(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
 																);
-															})
-														}
-															className="h-4 w-4 rounded border-slate-300 text-orange-500"
-														/>
-														{name}
-													</label>
+																const templateLabel = formatTemplateTimeLabel(option);
+
+																return (
+																	<label key={optionKey} className="inline-flex select-none items-start gap-2 text-sm text-slate-700">
+																		<input
+																			type="checkbox"
+																			checked={checked}
+																			onChange={() =>
+																			setDroppingPoints((prev) => {
+																				const auto = autoPointByKey.get(optionKey);
+																				return togglePointByStop(
+																					prev,
+																					option,
+																					auto
+																						? { ...auto, _auto: true }
+																						: { date: arrivalDate || date, time: arrivalTime || time, _auto: false }
+																				);
+																			})
+																		}
+																		className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
+																	/>
+																		<span>
+																			<span className="block">{option.name}</span>
+																			{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
+																		</span>
+																	</label>
+																);
+															})}
+														</div>
+													</div>
 												))}
 											</div>
 										)}
@@ -999,7 +1091,7 @@ export default function ManageSchedules() {
 											<div className="mt-4 space-y-3">
 												<div className="text-xs font-semibold text-slate-600">Drop times</div>
 												{sortedDroppingPoints.map((p) => (
-													<div key={p.name} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+													<div key={pointIdentity(p)} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
 														<div className="text-sm font-semibold text-slate-800">{p.name}</div>
 														<div className="mt-2 grid gap-3 sm:grid-cols-2">
 															<div>
@@ -1007,7 +1099,7 @@ export default function ManageSchedules() {
 																<input
 																	type="date"
 																	value={p.date || ""}
-																	onChange={(e) => updatePointField(setDroppingPoints, p.name, "date", e.target.value)}
+																	onChange={(e) => updatePointField(setDroppingPoints, p, "date", e.target.value)}
 																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
 																/>
 															</div>
@@ -1016,7 +1108,7 @@ export default function ManageSchedules() {
 																<input
 																	type="time"
 																	value={p.time || ""}
-																	onChange={(e) => updatePointField(setDroppingPoints, p.name, "time", e.target.value)}
+																	onChange={(e) => updatePointField(setDroppingPoints, p, "time", e.target.value)}
 																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
 																/>
 															</div>
@@ -1029,7 +1121,21 @@ export default function ManageSchedules() {
 								</div>
 							</div>
 
-							<div className="grid gap-4 lg:grid-cols-3">
+							{showBusPolicyLoadedHint ? (
+								<div
+									className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+										selectedBusHasPolicies
+											? "border-emerald-200 bg-emerald-50 text-emerald-800"
+											: "border-amber-200 bg-amber-50 text-amber-800"
+									}`}
+								>
+									{selectedBusHasPolicies
+										? `Policies loaded from selected bus${selectedBus?.name ? `: ${selectedBus.name}` : ""}.`
+										: `Selected bus${selectedBus?.name ? ` (${selectedBus.name})` : ""} has no saved policies yet. You can enter them manually.`}
+								</div>
+							) : null}
+
+							<div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
 								<div>
 									<label className="block text-sm font-medium text-slate-700">Refund policy</label>
 									<textarea
@@ -1057,6 +1163,16 @@ export default function ManageSchedules() {
 										value={dateChangePolicy}
 										onChange={(e) => setDateChangePolicy(e.target.value)}
 										placeholder="Write date-change rules..."
+										className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
+									/>
+								</div>
+								<div>
+									<label className="block text-sm font-medium text-slate-700">Luggage policy</label>
+									<textarea
+										rows={3}
+										value={luggagePolicy}
+										onChange={(e) => setLuggagePolicy(e.target.value)}
+										placeholder="Write luggage allowance and restrictions..."
 										className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
 									/>
 								</div>
@@ -1093,7 +1209,7 @@ export default function ManageSchedules() {
 										<div>
 											<div className="text-base font-extrabold text-slate-900">{scheduleTitle(sch)}</div>
 											<div className="mt-1 text-sm text-slate-600">
-												Price: <span className="font-semibold text-slate-900">{formatCurrency(sch.price)}</span>
+												Fare: <span className="font-semibold text-slate-900">{getScheduleFareSummary(sch)}</span>
 												{sch.refundable ? <span className="ml-2 rounded-full bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200">Refundable</span> : null}
 											</div>
 										</div>

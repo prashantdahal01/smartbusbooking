@@ -1,8 +1,9 @@
-// API routes for booking management (authenticated users)
+// API routes for booking management (authenticated users; cancellation is admin-only)
 const express = require("express");
 const router = express.Router();
 const bookingController = require("../controllers/booking.controller");
 const { verifyToken } = require("../middleware/auth.middleware");
+const { authorizeRoles } = require("../middleware/role.middleware");
 
 // POST   /api/bookings           – Create a new booking
 // GET    /api/bookings           – List bookings for current user
@@ -18,8 +19,9 @@ router.post("/unlock", bookingController.unlockSeats);
 // Bookings
 router.post("/", bookingController.createBooking);
 router.get("/", bookingController.getMyBookings);
+router.get("/operator", authorizeRoles("operator"), bookingController.getOperatorBookings);
 router.get("/:id/ticket", bookingController.getTicketPdf);
 router.get("/:id", bookingController.getBookingById);
-router.delete("/:id", bookingController.cancelBooking);
+router.delete("/:id", authorizeRoles("admin"), bookingController.cancelBooking);
 
 module.exports = router;

@@ -12,7 +12,7 @@ const FALLBACK_DISTRICTS = [
 	{ name: "Sindhuli", cities: ["Bardibas", "Sindhulimadi"] },
 	{ name: "Sunsari", cities: ["Itahari", "Dharan"] },
 	{ name: "Morang", cities: ["Biratchowk", "Belbari", "Laxminagar", "Pathari", "Urlabari"] },
-	{ name: "Jhapa", cities: ["Damak", "Birtamod", "Kakarvitta"] },
+	{ name: "Jhapa", cities: ["Damak", "Birtamod", "Kakarvitta", "Kakarbhitta"] },
 	{ name: "Chitwan", cities: ["Narayangadh", "Sauraha"] },
 	{ name: "Pokhara", cities: ["Prithvi Chowk", "Lakeside"] },
 ];

@@ -4,19 +4,46 @@ import axiosInstance from "./axios";
 // createBooking(bookingData)  – POST /api/bookings
 // getMyBookings()             – GET  /api/bookings
 // getBookingById(id)          – GET  /api/bookings/:id
-// cancelBooking(id)           – DELETE /api/bookings/:id
 
-export async function searchSchedules({ source, destination, date }) {
+export async function searchSchedules({ source, destination, date, includeRoutePlan = false }) {
 	const params = new URLSearchParams();
 	if (source) params.set("source", source);
 	if (destination) params.set("destination", destination);
 	if (date) params.set("date", date);
+	if (includeRoutePlan) params.set("includeRoutePlan", "true");
 	const res = await axiosInstance.get(`/schedules/search?${params.toString()}`);
+	return res.data;
+}
+
+export async function getDistrictRoutePlan({ source, destination }) {
+	const params = new URLSearchParams();
+	if (source) params.set("source", source);
+	if (destination) params.set("destination", destination);
+	const res = await axiosInstance.get(`/schedules/route-plan?${params.toString()}`);
 	return res.data;
 }
 
 export async function getScheduleSearchOptions() {
 	const res = await axiosInstance.get("/schedules/options");
+	return res.data;
+}
+
+export async function searchLocations({ q, limit = 10 } = {}) {
+	const queryText = String(q || "").trim();
+	if (!queryText) return [];
+
+	const safeLimit = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.trunc(Number(limit)) : 10;
+	const params = new URLSearchParams();
+	params.set("q", queryText);
+	params.set("limit", String(safeLimit));
+
+	const res = await axiosInstance.get(`/locations/search?${params.toString()}`);
+	return Array.isArray(res.data) ? res.data : [];
+}
+
+export async function getPopularRoutes(limit = 6) {
+	const safeLimit = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.trunc(Number(limit)) : 6;
+	const res = await axiosInstance.get(`/routes/popular?limit=${safeLimit}`);
 	return res.data;
 }
 
@@ -36,13 +63,13 @@ export async function unlockSeats({ scheduleId, seats }) {
 	return res.data;
 }
 
-export async function createBooking({ scheduleId, seats, passenger, boardingPoint, droppingPoint }) {
-	const res = await axiosInstance.post("/bookings", { scheduleId, seats, passenger, boardingPoint, droppingPoint });
+export async function createBooking({ scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint }) {
+	const res = await axiosInstance.post("/bookings", { scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint });
 	return res.data;
 }
 
-export async function initiateEsewaPayment({ scheduleId, seats, passenger, boardingPoint, droppingPoint }) {
-	const res = await axiosInstance.post("/payments/esewa/initiate", { scheduleId, seats, passenger, boardingPoint, droppingPoint });
+export async function initiateEsewaPayment({ scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint }) {
+	const res = await axiosInstance.post("/payments/esewa/initiate", { scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint });
 	return res.data;
 }
 
@@ -56,15 +83,82 @@ export async function getBookingById(id) {
 	return res.data;
 }
 
-export async function cancelBooking(id) {
-	const res = await axiosInstance.delete(`/bookings/${id}`);
-	return res.data;
-}
+const resolveDownloadFilename = (headers, fallback) => {
+	const raw = String(headers?.["content-disposition"] || "");
+	const utfMatch = raw.match(/filename\*=UTF-8''([^;]+)/i);
+	if (utfMatch?.[1]) {
+		return decodeURIComponent(utfMatch[1].trim());
+	}
+
+	const plainMatch = raw.match(/filename=\"?([^\";]+)\"?/i);
+	if (plainMatch?.[1]) {
+		return plainMatch[1].trim();
+	}
+
+	return fallback;
+};
+
+const parseErrorMessageFromText = (text, fallback) => {
+	const raw = String(text || "").trim();
+	if (!raw) return fallback;
+
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed?.message) return String(parsed.message);
+	} catch {
+		// Non-JSON error body
+	}
+
+	if (/^<!doctype html>|<html[\s>]/i.test(raw)) {
+		return fallback;
+	}
+
+	return raw.slice(0, 180);
+};
+
+const getBlobPdfSignature = async (blob) => {
+	try {
+		const header = await blob.slice(0, 5).arrayBuffer();
+		return new TextDecoder("ascii").decode(header);
+	} catch {
+		return "";
+	}
+};
 
 export async function getBookingTicketPdf(id) {
 	const res = await axiosInstance.get(`/bookings/${id}/ticket`, {
 		responseType: "blob",
 		headers: { Accept: "application/pdf" },
+		validateStatus: () => true,
 	});
-	return res.data;
+
+	const status = Number(res?.status || 0);
+	const blob = res?.data instanceof Blob ? res.data : new Blob([res?.data || ""]);
+	const contentType = String(res?.headers?.["content-type"] || blob.type || "").toLowerCase();
+
+	if (status < 200 || status >= 300) {
+		const responseText = await blob.text();
+		const message = parseErrorMessageFromText(responseText, `Ticket download failed (HTTP ${status || "unknown"})`);
+		throw new Error(message);
+	}
+
+	const signature = await getBlobPdfSignature(blob);
+	const isPdfByType = contentType.includes("application/pdf");
+	const isPdfBySignature = signature === "%PDF-";
+
+	if (!isPdfByType && !isPdfBySignature) {
+		const responseText = await blob.text();
+		const message = parseErrorMessageFromText(responseText, "Server returned an invalid PDF response");
+		throw new Error(message);
+	}
+
+	const safePdfBlob =
+		blob.type === "application/pdf"
+			? blob
+			: new Blob([blob], { type: "application/pdf" });
+
+	return {
+		blob: safePdfBlob,
+		filename: resolveDownloadFilename(res.headers, `ticket-${id}.pdf`),
+	};
 }

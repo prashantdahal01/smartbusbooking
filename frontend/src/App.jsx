@@ -1,137 +1,136 @@
 // Root React component with React Router configuration
 // Defines all application routes with role-based protection
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { Suspense, lazy } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Navbar from "./components/Navbar";
+import ErrorBoundary from "./components/ErrorBoundary";
 
-// Shared pages
-import LoginPage from "./pages/LoginPage";
-import RegisterPage from "./pages/RegisterPage";
-import ForgotPasswordPage from "./pages/ForgotPasswordPage";
-import ResetPasswordPage from "./pages/ResetPasswordPage";
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const RegisterPage = lazy(() => import("./pages/RegisterPage"));
+const ForgotPasswordPage = lazy(() => import("./pages/ForgotPasswordPage"));
+const ResetPasswordPage = lazy(() => import("./pages/ResetPasswordPage"));
 
-// User pages
-import HomePage from "./pages/user/HomePage";
-import SearchPage from "./pages/user/SearchPage";
-import BookingPage from "./pages/user/BookingPage";
-import DashboardPage from "./pages/user/DashboardPage";
+const HomePage = lazy(() => import("./pages/user/HomePage"));
+const SearchPage = lazy(() => import("./pages/user/SearchPage"));
+const BookingPage = lazy(() => import("./pages/user/BookingPage"));
+const DashboardPage = lazy(() => import("./pages/user/DashboardPage"));
+const TicketPage = lazy(() => import("./pages/user/TicketPage"));
 
-// Admin pages
-import AdminDashboard from "./pages/admin/AdminDashboard";
-import ManageBuses from "./pages/admin/ManageBuses";
-import ManageRoutes from "./pages/admin/ManageRoutes";
-import ManageStops from "./pages/admin/ManageStops";
-import ManageSchedules from "./pages/admin/ManageSchedules";
-import ManageUsers from "./pages/admin/ManageUsers";
+const AdminLayout = lazy(() => import("./components/admin/AdminLayout"));
+const AdminDashboard = lazy(() => import("./pages/admin/AdminDashboard"));
+const ManageBuses = lazy(() => import("./pages/admin/ManageBuses"));
+const ManageRoutes = lazy(() => import("./pages/admin/ManageRoutes"));
+const ManageStops = lazy(() => import("./pages/admin/ManageStops"));
+const ManageSchedules = lazy(() => import("./pages/admin/ManageSchedules"));
+const ManageUsers = lazy(() => import("./pages/admin/ManageUsers"));
+const ManageBookings = lazy(() => import("./pages/admin/ManageBookings"));
+const Settings = lazy(() => import("./pages/admin/Settings"));
 
-// Operator pages
-import OperatorDashboard from "./pages/operator/OperatorDashboard";
-import MyBuses from "./pages/operator/MyBuses";
-import PassengerList from "./pages/operator/PassengerList";
+const OperatorLayout = lazy(() => import("./components/operator/OperatorLayout"));
+const OperatorDashboard = lazy(() => import("./pages/operator/OperatorDashboard"));
+const ManageOperatorBuses = lazy(() => import("./pages/operator/ManageBuses"));
+const ManageOperatorSchedules = lazy(() => import("./pages/operator/ManageSchedules"));
+const ViewOperatorBookings = lazy(() => import("./pages/operator/ViewBookings"));
+const OperatorProfile = lazy(() => import("./pages/operator/OperatorProfile"));
+
+function RouteFallback() {
+  return (
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+      <div className="skeleton h-40 w-full rounded-2xl" />
+      <div className="mt-3 skeleton h-40 w-full rounded-2xl" />
+    </div>
+  );
+}
+
+function AppShell() {
+  const location = useLocation();
+  const hideNavbar = location.pathname.startsWith("/admin")
+    || location.pathname.startsWith("/operator")
+    || location.pathname.startsWith("/ticket");
+
+  return (
+    <>
+      {!hideNavbar ? <Navbar /> : null}
+      <ErrorBoundary resetKey={location.pathname}>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
+
+            {/* Customer routes */}
+            <Route path="/" element={<HomePage />} />
+            <Route path="/search" element={<SearchPage />} />
+            <Route path="/booking/:scheduleId" element={<BookingPage />} />
+            <Route path="/seats/:busId" element={<BookingPage />} />
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute roles={["customer"]}>
+                  <DashboardPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/ticket/:bookingId"
+              element={
+                <ProtectedRoute roles={["customer"]}>
+                  <TicketPage />
+                </ProtectedRoute>
+              }
+            />
+
+            {/* Admin routes */}
+            <Route
+              path="/admin"
+              element={
+                <ProtectedRoute roles={["admin"]}>
+                  <AdminLayout />
+                </ProtectedRoute>
+              }
+            >
+              <Route index element={<AdminDashboard />} />
+              <Route path="buses" element={<ManageBuses />} />
+              <Route path="routes" element={<ManageRoutes />} />
+              <Route path="stops" element={<ManageStops />} />
+              <Route path="schedules" element={<ManageSchedules />} />
+              <Route path="bookings" element={<ManageBookings />} />
+              <Route path="users" element={<ManageUsers />} />
+              <Route path="settings" element={<Settings />} />
+            </Route>
+
+            {/* Operator routes */}
+            <Route
+              path="/operator"
+              element={
+                <ProtectedRoute roles={["operator"]}>
+                  <OperatorLayout />
+                </ProtectedRoute>
+              }
+            >
+              <Route index element={<Navigate to="dashboard" replace />} />
+              <Route path="dashboard" element={<OperatorDashboard />} />
+              <Route path="buses" element={<ManageOperatorBuses />} />
+              <Route path="schedules" element={<ManageOperatorSchedules />} />
+              <Route path="bookings" element={<ViewOperatorBookings />} />
+              <Route path="profile" element={<OperatorProfile />} />
+            </Route>
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
+    </>
+  );
+}
 
 export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <Navbar />
-        <Routes>
-          {/* Public routes */}
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/register" element={<RegisterPage />} />
-          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-          <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
-
-          {/* Customer routes */}
-          <Route path="/" element={<HomePage />} />
-          <Route path="/search" element={<SearchPage />} />
-          <Route path="/booking/:scheduleId" element={<BookingPage />} />
-          <Route path="/seats/:scheduleId" element={<BookingPage />} />
-          <Route
-            path="/dashboard"
-            element={
-              <ProtectedRoute roles={["customer"]}>
-                <DashboardPage />
-              </ProtectedRoute>
-            }
-          />
-
-          {/* Admin routes */}
-          <Route
-            path="/admin"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <AdminDashboard />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/buses"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <ManageBuses />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/routes"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <ManageRoutes />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/stops"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <ManageStops />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/schedules"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <ManageSchedules />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/admin/users"
-            element={
-              <ProtectedRoute roles={["admin"]}>
-                <ManageUsers />
-              </ProtectedRoute>
-            }
-          />
-
-          {/* Operator routes */}
-          <Route
-            path="/operator"
-            element={
-              <ProtectedRoute roles={["operator"]}>
-                <OperatorDashboard />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/operator/buses"
-            element={
-              <ProtectedRoute roles={["operator"]}>
-                <MyBuses />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/operator/passengers/:scheduleId"
-            element={
-              <ProtectedRoute roles={["operator"]}>
-                <PassengerList />
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
+        <AppShell />
       </BrowserRouter>
     </AuthProvider>
   );

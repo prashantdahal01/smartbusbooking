@@ -2,22 +2,127 @@
 const crypto = require("crypto");
 
 const Booking = require("../models/Booking");
-const SeatLock = require("../models/SeatLock");
 const Schedule = require("../models/Schedule");
+const { seatLockService } = require("../algorithms/seatLock");
 const { sendTicketEmailSafely } = require("../utils/mailer");
+const { createAdminNotification } = require("../services/notification.service");
+const { buildRouteOrderIndex } = require("../utils/routePoints");
 
-const LOCK_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_SEAT_PRICE = 0;
 
-const cleanupExpiredLocks = async (scheduleId) => {
-	const cutoff = new Date(Date.now() - LOCK_TTL_MS);
-	await SeatLock.deleteMany({ schedule: scheduleId, lockedAt: { $lt: cutoff } });
+const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+const normalizeSeatType = (value) => {
+	const normalized = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+	if (normalized === "SLEEPER") return "SLEEPER";
+	if (normalized === "SHARED_SLEEPER") return "SHARED_SLEEPER";
+	return "SEATER";
+};
+const sortSeatLabels = (a, b) => String(a || "").localeCompare(String(b || ""), undefined, { numeric: true, sensitivity: "base" });
+const toFinitePrice = (value, fallbackValue = DEFAULT_SEAT_PRICE) => {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallbackValue;
+};
+
+const buildSeatQueryValues = (seatLabels) => {
+	const values = new Set();
+	(Array.isArray(seatLabels) ? seatLabels : []).forEach((label) => {
+		values.add(label);
+		if (/^\d+$/.test(label)) {
+			values.add(Number(label));
+		}
+	});
+	return [...values];
+};
+
+const buildSeatCatalog = (bus, fallbackPrice) => {
+	const catalog = new Map();
+	const rawDecks = Array.isArray(bus?.decks) ? bus.decks : [];
+
+	rawDecks.forEach((deck, deckIdx) => {
+		const deckNumber = Number.isFinite(Number(deck?.deckNumber)) && Number(deck.deckNumber) > 0
+			? Math.trunc(Number(deck.deckNumber))
+			: deckIdx + 1;
+		const deckName = String(deck?.name || "").trim() || (deckNumber === 1 ? "Lower Deck" : `Deck ${deckNumber}`);
+		const seats = Array.isArray(deck?.seats) ? deck.seats : [];
+
+		seats.forEach((seat) => {
+			const seatLabel = normalizeSeatLabel(seat?.seatNumber);
+			if (!seatLabel || catalog.has(seatLabel)) return;
+			catalog.set(seatLabel, {
+				seatLabel,
+				seatNumber: String(seat?.seatNumber || seatLabel).trim() || seatLabel,
+				deckNumber,
+				deckName,
+				seatType: normalizeSeatType(seat?.seatType),
+				price: toFinitePrice(seat?.price, fallbackPrice),
+				isAvailable: seat?.isAvailable !== false,
+			});
+		});
+	});
+
+	if (catalog.size > 0) return catalog;
+
+	const totalSeats = Number.isFinite(Number(bus?.totalSeats)) && Number(bus?.totalSeats) > 0
+		? Math.trunc(Number(bus.totalSeats))
+		: 0;
+
+	for (let i = 1; i <= totalSeats; i += 1) {
+		const seatLabel = String(i);
+		catalog.set(seatLabel, {
+			seatLabel,
+			seatNumber: seatLabel,
+			deckNumber: 1,
+			deckName: "Main Deck",
+			seatType: "SEATER",
+			price: toFinitePrice(fallbackPrice),
+			isAvailable: true,
+		});
+	}
+
+	return catalog;
+};
+
+const validateSeatSelection = (seatCatalog, seatLabels) => {
+	const invalidSeats = [];
+	const unavailableSeats = [];
+
+	seatLabels.forEach((seatLabel) => {
+		const seat = seatCatalog.get(seatLabel);
+		if (!seat) {
+			invalidSeats.push(seatLabel);
+			return;
+		}
+		if (seat.isAvailable === false) {
+			unavailableSeats.push(seatLabel);
+		}
+	});
+
+	return { invalidSeats, unavailableSeats };
+};
+
+const buildSeatPriceBreakdown = (seatLabels, seatCatalog) => {
+	return seatLabels
+		.map((seatLabel) => {
+			const seat = seatCatalog.get(seatLabel);
+			if (!seat) return null;
+			return {
+				seatLabel,
+				deckNumber: seat.deckNumber,
+				deckName: seat.deckName,
+				seatType: seat.seatType,
+				price: toFinitePrice(seat.price),
+			};
+		})
+		.filter(Boolean);
 };
 
 const parseSeats = (seats) => {
 	if (!Array.isArray(seats) || seats.length === 0) return null;
-	const parsed = seats.map((s) => Number(s)).filter((n) => Number.isInteger(n) && n > 0);
+	const parsed = seats
+		.map((seat) => normalizeSeatLabel(seat))
+		.filter(Boolean);
 	if (parsed.length !== seats.length) return null;
-	return [...new Set(parsed)].sort((a, b) => a - b);
+	return [...new Set(parsed)].sort(sortSeatLabels);
 };
 
 const parsePassenger = (passenger) => {
@@ -36,42 +141,69 @@ const parsePassenger = (passenger) => {
 	return { name, age, gender, phone };
 };
 
+const parsePassengers = ({ passengers, seatLabels, fallbackPassenger }) => {
+	const normalizedSeats = (Array.isArray(seatLabels) ? seatLabels : []).map((seat) => normalizeSeatLabel(seat)).filter(Boolean);
+	const source = passengers == null ? [] : passengers;
+
+	if (source != null && !Array.isArray(source)) {
+		return { ok: false, message: "passengers[] must be an array" };
+	}
+
+	const parsed = [];
+	for (let index = 0; index < source.length; index += 1) {
+		const entry = source[index];
+		if (!entry || typeof entry !== "object") {
+			return { ok: false, message: "Each passenger in passengers[] must be an object" };
+		}
+
+		const base = parsePassenger(entry);
+		if (!base) {
+			return { ok: false, message: "Each passengers[] item must include name, age, gender, and phone" };
+		}
+
+		const seatLabel = normalizeSeatLabel(entry?.seatLabel || normalizedSeats[index] || "");
+		const idNumber = String(entry?.idNumber || "").trim();
+		parsed.push({
+			...base,
+			...(seatLabel ? { seatLabel } : {}),
+			...(idNumber ? { idNumber } : {}),
+		});
+	}
+
+	if (parsed.length === 0 && fallbackPassenger) {
+		parsed.push({
+			...fallbackPassenger,
+			...(normalizedSeats[0] ? { seatLabel: normalizedSeats[0] } : {}),
+		});
+	}
+
+	if (normalizedSeats.length > 0 && parsed.length > normalizedSeats.length) {
+		return { ok: false, message: "passengers[] cannot exceed selected seats" };
+	}
+
+	const assignedSeats = new Set();
+	for (const item of parsed) {
+		if (!item.seatLabel) continue;
+		if (normalizedSeats.length > 0 && !normalizedSeats.includes(item.seatLabel)) {
+			return { ok: false, message: `Passenger seatLabel ${item.seatLabel} is not in selected seats` };
+		}
+		if (assignedSeats.has(item.seatLabel)) {
+			return { ok: false, message: `Duplicate passenger seatLabel ${item.seatLabel} in passengers[]` };
+		}
+		assignedSeats.add(item.seatLabel);
+	}
+
+	const unassignedSeatQueue = normalizedSeats.filter((seatLabel) => !assignedSeats.has(seatLabel));
+	for (const item of parsed) {
+		if (item.seatLabel) continue;
+		const nextSeat = unassignedSeatQueue.shift();
+		if (nextSeat) item.seatLabel = nextSeat;
+	}
+
+	return { ok: true, value: parsed };
+};
+
 const stopKey = (s) => String(s || "").trim().toLowerCase();
-
-const toStopName = (raw) => {
-	if (raw === null || raw === undefined) return "";
-	if (typeof raw === "string") return raw;
-	if (typeof raw === "object") return raw.name;
-	return "";
-};
-
-const buildRouteStops = (route) => {
-	const src = String(route?.source || "").trim();
-	const dst = String(route?.destination || "").trim();
-	const midsRaw = Array.isArray(route?.stops) ? route.stops : [];
-	const mids = midsRaw.map((s) => String(toStopName(s) || "").trim()).filter(Boolean);
-	const list = [src, ...mids, dst].map((s) => String(s || "").trim()).filter(Boolean);
-	const seen = new Set();
-	const out = [];
-	list.forEach((s) => {
-		const k = stopKey(s);
-		if (!k) return;
-		if (seen.has(k)) return;
-		seen.add(k);
-		out.push(s);
-	});
-	return out;
-};
-
-const buildStopIndexByKey = (stops) => {
-	const map = new Map();
-	(Array.isArray(stops) ? stops : []).forEach((s, idx) => {
-		const k = stopKey(s);
-		if (!k) return;
-		if (!map.has(k)) map.set(k, idx);
-	});
-	return map;
-};
 
 const pickSchedulePoint = (points, selectedName) => {
 	const selectedKey = stopKey(selectedName);
@@ -82,7 +214,14 @@ const pickSchedulePoint = (points, selectedName) => {
 	const name = String(found?.name || "").trim();
 	const date = String(found?.date || "").trim();
 	const time = String(found?.time || "").trim();
-	return { name, date, time };
+	const orderRaw = Number(found?.order);
+	const order = Number.isFinite(orderRaw) && orderRaw > 0 ? Math.trunc(orderRaw) : undefined;
+	return {
+		name,
+		date,
+		time,
+		...(Number.isFinite(order) ? { order } : {}),
+	};
 };
 
 const parseIsoDateTimeMs = (date, time) => {
@@ -168,11 +307,22 @@ exports.initiateEsewaPayment = async (req, res) => {
 			return res.status(400).json({ message: "passenger{name,age,gender,phone} is required" });
 		}
 
+		const passengersResult = parsePassengers({
+			passengers: req.body?.passengers,
+			seatLabels: normalizedSeats,
+			fallbackPassenger: passenger,
+		});
+		if (!passengersResult.ok) {
+			return res.status(400).json({ message: passengersResult.message });
+		}
+		const passengers = passengersResult.value;
+
 		const { productCode, secretKey, formUrl } = getEsewaConfig();
 
 		const schedule = await Schedule.findById(scheduleId).populate("bus").populate("route");
 		if (!schedule) return res.status(404).json({ message: "Schedule not found" });
 		if (!schedule.route) return res.status(400).json({ message: "Schedule route missing" });
+		if (!schedule.bus) return res.status(400).json({ message: "Schedule bus not configured" });
 
 		const selectedBoardingPoint = pickSchedulePoint(schedule.boardingPoints, boardingPointName);
 		if (!selectedBoardingPoint) {
@@ -183,15 +333,23 @@ exports.initiateEsewaPayment = async (req, res) => {
 			return res.status(400).json({ message: "Invalid dropping point" });
 		}
 
-		const routeStops = buildRouteStops(schedule.route);
-		const indexByKey = buildStopIndexByKey(routeStops);
-		const bIdx = indexByKey.get(stopKey(selectedBoardingPoint.name));
-		const dIdx = indexByKey.get(stopKey(selectedDroppingPoint.name));
-		if (bIdx === undefined || dIdx === undefined) {
-			return res.status(400).json({ message: "Selected points must exist in the route stop list" });
-		}
-		if (dIdx <= bIdx) {
-			return res.status(400).json({ message: "Dropping point must be after boarding point" });
+		const boardingOrder = Number(selectedBoardingPoint?.order);
+		const droppingOrder = Number(selectedDroppingPoint?.order);
+
+		if (Number.isFinite(boardingOrder) && Number.isFinite(droppingOrder)) {
+			if (droppingOrder <= boardingOrder) {
+				return res.status(400).json({ message: "Dropping point must be after boarding point" });
+			}
+		} else {
+			const routeOrderIndex = buildRouteOrderIndex(schedule.route || {});
+			const bIdx = routeOrderIndex.get(stopKey(selectedBoardingPoint.name));
+			const dIdx = routeOrderIndex.get(stopKey(selectedDroppingPoint.name));
+			if (bIdx === undefined || dIdx === undefined) {
+				return res.status(400).json({ message: "Selected points must exist in the route stop list" });
+			}
+			if (dIdx <= bIdx) {
+				return res.status(400).json({ message: "Dropping point must be after boarding point" });
+			}
 		}
 
 		const boardingMs = parseIsoDateTimeMs(selectedBoardingPoint.date, selectedBoardingPoint.time);
@@ -203,52 +361,64 @@ exports.initiateEsewaPayment = async (req, res) => {
 			return res.status(400).json({ message: "Dropping time must be after boarding time" });
 		}
 
-		// Remove stale locks so they don't block unique index or payment flow.
-		await cleanupExpiredLocks(scheduleId);
-
-		const totalSeats = schedule.bus?.totalSeats || 0;
-		if (totalSeats <= 0) return res.status(400).json({ message: "Schedule bus missing totalSeats" });
-		if (normalizedSeats.some((n) => n > totalSeats)) {
-			return res.status(400).json({ message: "One or more seats are out of range" });
+		const seatCatalog = buildSeatCatalog(schedule.bus, DEFAULT_SEAT_PRICE);
+		if (seatCatalog.size <= 0) {
+			return res.status(400).json({ message: "No seat layout configured for this bus" });
 		}
+
+		const { invalidSeats, unavailableSeats } = validateSeatSelection(seatCatalog, normalizedSeats);
+		if (invalidSeats.length > 0) {
+			return res.status(400).json({ message: "One or more seats are invalid", invalidSeats });
+		}
+		if (unavailableSeats.length > 0) {
+			return res.status(400).json({ message: "One or more seats are currently unavailable", unavailableSeats });
+		}
+
+		const seatQueryValues = buildSeatQueryValues(normalizedSeats);
 
 		// Ensure seats are not already booked
 		const alreadyBooked = await Booking.find({
 			schedule: scheduleId,
 			status: "confirmed",
-			seats: { $in: normalizedSeats },
+			seats: { $in: seatQueryValues },
 		}).select("_id seats");
 
 		if (alreadyBooked.length > 0) {
-			const bookedSeats = [...new Set(alreadyBooked.flatMap((b) => b.seats))].filter((s) => normalizedSeats.includes(s));
+			const bookedSeats = [...new Set(
+				alreadyBooked
+					.flatMap((b) => (Array.isArray(b?.seats) ? b.seats : []))
+					.map((seat) => normalizeSeatLabel(seat))
+					.filter((seat) => normalizedSeats.includes(seat))
+			)].sort(sortSeatLabels);
 			return res.status(409).json({ message: "Some seats already booked", bookedSeats });
 		}
 
-		// Require locks held by current user for all seats
-		const locks = await SeatLock.find({
-			schedule: scheduleId,
-			seatNumber: { $in: normalizedSeats },
-			lockedBy: req.user.id,
-		}).select("seatNumber");
-
-		const lockedSeatNumbers = new Set(locks.map((l) => l.seatNumber));
-		const missingLocks = normalizedSeats.filter((s) => !lockedSeatNumbers.has(s));
-		if (missingLocks.length > 0) {
-			return res.status(409).json({ message: "Seat lock required before payment", missingLocks });
+		const lockValidation = await seatLockService.validateLocks({
+			scheduleId,
+			seats: normalizedSeats,
+			userId: req.user.id,
+		});
+		if (!lockValidation.valid) {
+			const missingLocks = [...lockValidation.missingLocks, ...lockValidation.conflictSeats].sort(sortSeatLabels);
+			return res.status(409).json({
+				message: "Seat lock required before payment. Missing locks",
+				missingLocks,
+				conflictSeats: lockValidation.conflictSeats,
+				failedSeats: missingLocks,
+			});
 		}
 
-		// Refresh lock TTL starting from payment initiation time
-		await SeatLock.updateMany(
-			{
-				schedule: scheduleId,
-				seatNumber: { $in: normalizedSeats },
-				lockedBy: req.user.id,
-			},
-			{ $set: { lockedAt: new Date() } }
-		);
+		// Extend lock TTL from payment initiation to reduce gateway timeout risk.
+		await seatLockService.lockSeats({
+			scheduleId,
+			seats: normalizedSeats,
+			userId: req.user.id,
+			sessionId: req.body?.sessionId,
+		});
 
-		const pricePerSeat = Number.isFinite(Number(schedule.price)) ? Number(schedule.price) : 0;
-		const totalPrice = pricePerSeat * normalizedSeats.length;
+		const seatPriceBreakdown = buildSeatPriceBreakdown(normalizedSeats, seatCatalog);
+		const totalPrice = seatPriceBreakdown.reduce((sum, seat) => sum + toFinitePrice(seat.price), 0);
+		const pricePerSeat = normalizedSeats.length > 0 ? Number((totalPrice / normalizedSeats.length).toFixed(2)) : 0;
 		if (!Number.isFinite(totalPrice) || totalPrice <= 0) {
 			return res.status(400).json({ message: "Invalid schedule price" });
 		}
@@ -268,9 +438,11 @@ exports.initiateEsewaPayment = async (req, res) => {
 				user: req.user.id,
 				schedule: scheduleId,
 				passenger,
+				passengers,
 				boardingPoint: selectedBoardingPoint,
 				droppingPoint: selectedDroppingPoint,
 				seats: normalizedSeats,
+				seatPriceBreakdown,
 				pricePerSeat,
 				totalPrice,
 				status: "payment_pending",
@@ -284,6 +456,7 @@ exports.initiateEsewaPayment = async (req, res) => {
 			});
 		} else {
 			booking.passenger = passenger;
+			booking.passengers = passengers;
 			booking.boardingPoint = selectedBoardingPoint;
 			booking.droppingPoint = selectedDroppingPoint;
 			await booking.save();
@@ -320,7 +493,8 @@ exports.initiateEsewaPayment = async (req, res) => {
 
 		return res.json({ bookingId: booking._id, formUrl, fields });
 	} catch (e) {
-		return res.status(500).json({ message: e.message });
+		const formatted = seatLockService.formatError(e);
+		return res.status(formatted.statusCode).json(formatted.payload);
 	}
 };
 
@@ -368,21 +542,52 @@ exports.handleEsewaSuccess = async (req, res) => {
 		booking.payment.raw = { success: decoded, status };
 
 		if (gatewayStatus === "COMPLETE") {
-			booking.status = "confirmed";
-			booking.payment.status = "paid";
-			booking.payment.paidAt = booking.payment.paidAt || new Date();
-			await booking.save();
+			try {
+				await seatLockService.confirmBooking({
+					scheduleId: booking.schedule?._id || booking.schedule,
+					seats: booking.seats,
+					userId: booking.user?._id || booking.user,
+					confirmFn: async () => {
+						booking.status = "confirmed";
+						booking.payment.status = "paid";
+						booking.payment.paidAt = booking.payment.paidAt || new Date();
+						await booking.save();
+						return booking;
+					},
+				});
+			} catch (error) {
+				if (seatLockService.isSeatLockError(error)) {
+					booking.status = "payment_failed";
+					booking.payment.status = "failed";
+					await booking.save();
 
-			await SeatLock.deleteMany({
-				schedule: booking.schedule?._id || booking.schedule,
-				seatNumber: { $in: booking.seats },
-			});
+					await seatLockService.releaseLocks({
+						scheduleId: booking.schedule?._id || booking.schedule,
+						seats: booking.seats,
+						allowEmptySeats: true,
+					}).catch(() => {});
+					return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
+				}
+				throw error;
+			}
 
 			const ok = await sendTicketEmailSafely(booking);
 			if (!ok) {
 				// eslint-disable-next-line no-console
 				console.warn("Ticket email not sent for booking", String(booking._id));
 			}
+
+			await createAdminNotification({
+				type: "booking",
+				title: "New booking received",
+				message: `${booking?.passenger?.name || "A passenger"} completed booking on ${booking?.schedule?.route?.source || "Unknown"} -> ${booking?.schedule?.route?.destination || "Unknown"}.`,
+				entityType: "booking",
+				entityId: booking._id,
+				data: {
+					bookingId: String(booking._id),
+					status: "confirmed",
+				},
+			});
 
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=success&bookingId=${booking._id}`);
 		}
@@ -391,10 +596,11 @@ exports.handleEsewaSuccess = async (req, res) => {
 		booking.payment.status = "failed";
 		await booking.save();
 
-		await SeatLock.deleteMany({
-			schedule: booking.schedule?._id || booking.schedule,
-			seatNumber: { $in: booking.seats },
-		});
+		await seatLockService.releaseLocks({
+			scheduleId: booking.schedule?._id || booking.schedule,
+			seats: booking.seats,
+			allowEmptySeats: true,
+		}).catch(() => {});
 
 		return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
 	} catch (e) {
@@ -421,10 +627,11 @@ exports.handleEsewaFailure = async (req, res) => {
 			booking.payment.raw = { failure: decoded };
 			await booking.save();
 
-			await SeatLock.deleteMany({
-				schedule: booking.schedule,
-				seatNumber: { $in: booking.seats },
-			});
+			await seatLockService.releaseLocks({
+				scheduleId: booking.schedule,
+				seats: booking.seats,
+				allowEmptySeats: true,
+			}).catch(() => {});
 
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
 		}

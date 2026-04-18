@@ -1,742 +1,1309 @@
-// Page for selecting seats on a bus and completing the booking process
+import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import SeatMap from "../../components/SeatMap";
-import { getSeatStatus, initiateEsewaPayment, lockSeats, unlockSeats } from "../../services/booking.service";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import BookingSummaryPanel from "../../components/seats/BookingSummaryPanel";
+import BusImageGalleryModal from "../../components/seats/BusImageGalleryModal";
+import PassengerDetailsPanel from "../../components/seats/PassengerDetailsPanel";
+import SeatDeckMap from "../../components/seats/SeatDeckMap";
 import { useAuth } from "../../context/AuthContext";
+import { getSeatStatus, initiateEsewaPayment, lockSeats, unlockSeats } from "../../services/booking.service";
 import { formatCurrency, toAbsoluteAssetUrl } from "../../utils/helpers";
 
-const validatePassenger = ({ name, age, gender, phone }) => {
-	const normalizedName = String(name || "").trim();
-	const normalizedGender = String(gender || "").trim().toLowerCase();
-	const numericAge = Number(age);
-	const digits = String(phone || "").replace(/\D/g, "");
-
-	if (!normalizedName) return { ok: false, message: "Passenger name is required" };
-	if (!Number.isFinite(numericAge) || numericAge < 1 || numericAge > 120) return { ok: false, message: "Enter a valid age" };
-	if (!["male", "female", "other"].includes(normalizedGender)) return { ok: false, message: "Select a gender" };
-	if (digits.length < 7) return { ok: false, message: "Enter a valid phone number" };
-	return { ok: true };
-};
-
-const stopKey = (s) => String(s || "").trim().toLowerCase();
-
-const toStopName = (raw) => {
-	if (raw === null || raw === undefined) return "";
-	if (typeof raw === "string") return raw;
-	if (typeof raw === "object") return raw.name;
-	return "";
-};
+const stopKey = (value) => String(value || "").trim().toLowerCase();
 
 const parseIsoDateTimeMs = (date, time) => {
-	const d = String(date || "").trim();
-	const t = String(time || "").trim();
-	if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{2}:\d{2}$/.test(t)) return NaN;
-	return new Date(`${d}T${t}:00`).getTime();
+  const normalizedDate = String(date || "").trim();
+  const normalizedTime = String(time || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDate) || !/^\d{2}:\d{2}$/.test(normalizedTime)) return NaN;
+  return new Date(`${normalizedDate}T${normalizedTime}:00`).getTime();
 };
 
-const normalizeSeatNumbers = (seats) => {
-	if (!Array.isArray(seats)) return [];
-	const parsed = seats
-		.map((s) => Number(s))
-		.filter((n) => Number.isInteger(n) && n > 0);
-	return Array.from(new Set(parsed)).sort((a, b) => a - b);
+const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
+
+const normalizeSeatType = (value) => {
+  const normalized = String(value || "SEATER").trim().toUpperCase().replace(/[\s-]+/g, "_");
+  if (normalized === "SLEEPER") return "SLEEPER";
+  if (normalized === "SHARED_SLEEPER") return "SHARED_SLEEPER";
+  return "SEATER";
+};
+
+const normalizeSeatLabels = (seats) => {
+  if (!Array.isArray(seats)) return [];
+  const normalized = seats.map((seat) => normalizeSeatLabel(seat)).filter(Boolean);
+  return Array.from(new Set(normalized)).sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" }));
+};
+
+const extractSeatLabels = (seats) => {
+  if (!Array.isArray(seats)) return [];
+
+  return normalizeSeatLabels(
+    seats.map((seat) => {
+      if (typeof seat === "string" || typeof seat === "number") return seat;
+      if (seat && typeof seat === "object") return seat.seatLabel ?? seat.seatNumber;
+      return "";
+    })
+  );
+};
+
+const getMyLockedSeatLabels = (locks, userId) => {
+  if (!userId) return [];
+
+  return normalizeSeatLabels(
+    (Array.isArray(locks) ? locks : [])
+      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy) === String(userId))
+      .map((lock) => lock?.seatLabel ?? lock?.seatNumber)
+  );
+};
+
+const parseLockResult = (payload, requestedSeats = []) => {
+  const requested = normalizeSeatLabels(requestedSeats);
+  const lockedSeats = extractSeatLabels(payload?.lockedSeats ?? payload?.seats);
+  const failedSeats = extractSeatLabels(payload?.failedSeats);
+
+  // Backward compatibility: older API returned only { seats: [...] }.
+  if (lockedSeats.length === 0 && failedSeats.length === 0 && requested.length > 0) {
+    return { lockedSeats: requested, failedSeats: [] };
+  }
+
+  return { lockedSeats, failedSeats };
+};
+
+const parseLockFailureSeats = (error) => {
+  const data = error?.response?.data || {};
+
+  const failedSeats = normalizeSeatLabels([
+    ...extractSeatLabels(data?.failedSeats),
+    ...extractSeatLabels(data?.conflictSeats),
+    ...extractSeatLabels(data?.missingLocks),
+    ...extractSeatLabels(data?.bookedSeats),
+    ...extractSeatLabels(data?.unavailableSeats),
+    ...extractSeatLabels(data?.invalidSeats),
+  ]);
+
+  if (failedSeats.length > 0) return failedSeats;
+
+  // Legacy lock API used `lockedSeats` for conflicting seats.
+  return extractSeatLabels(data?.lockedSeats);
+};
+
+const normalizeGender = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (["male", "female", "other"].includes(normalized)) return normalized;
+  return "";
+};
+
+const validateContact = ({ name, phone }) => {
+  const normalizedName = String(name || "").trim();
+  const digits = String(phone || "").replace(/\D/g, "");
+
+  if (!normalizedName) return { ok: false, message: "Contact name is required" };
+  if (digits.length < 7) return { ok: false, message: "Enter a valid phone number" };
+  return { ok: true };
+};
+
+const createPlaceholderImage = ({ title, subtitle, gradientStart, gradientEnd }) => {
+  const safeTitle = String(title || "Bus View").slice(0, 40);
+  const safeSubtitle = String(subtitle || "SmartBus Booking").slice(0, 60);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 750'>
+    <defs>
+      <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+        <stop offset='0%' stop-color='${gradientStart}'/>
+        <stop offset='100%' stop-color='${gradientEnd}'/>
+      </linearGradient>
+    </defs>
+    <rect width='1200' height='750' fill='url(#g)'/>
+    <rect x='80' y='90' width='1040' height='570' rx='42' fill='rgba(255,255,255,0.16)' stroke='rgba(255,255,255,0.4)' stroke-width='3'/>
+    <text x='600' y='350' text-anchor='middle' fill='white' font-size='62' font-family='Segoe UI, Arial, sans-serif' font-weight='700'>${safeTitle}</text>
+    <text x='600' y='410' text-anchor='middle' fill='rgba(255,255,255,0.92)' font-size='30' font-family='Segoe UI, Arial, sans-serif'>${safeSubtitle}</text>
+  </svg>`;
+
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+};
+
+const LOCK_TTL_MS = 10 * 60 * 1000;
+
+const formatHoldCountdown = (ms) => {
+  const safeMs = Math.max(0, Number(ms) || 0);
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 };
 
 export default function BookingPage() {
-	const { scheduleId } = useParams();
-	const navigate = useNavigate();
-	const location = useLocation();
-	const { currentUser } = useAuth();
-	const [seatStatus, setSeatStatus] = useState(null);
-	const [selectedSeats, setSelectedSeats] = useState([]);
-	const [loadError, setLoadError] = useState("");
-	const [loading, setLoading] = useState(true);
-	const [actionLoading, setActionLoading] = useState(false);
-	const [toast, setToast] = useState(null);
-	const toastTimerRef = useRef(null);
+  const { scheduleId, busId } = useParams();
+  const activeScheduleId = scheduleId || busId || "";
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { currentUser } = useAuth();
 
-	const [passengerName, setPassengerName] = useState("");
-	const [passengerAge, setPassengerAge] = useState("");
-	const [passengerGender, setPassengerGender] = useState("");
-	const [passengerPhone, setPassengerPhone] = useState("");
-	const [boardingPoint, setBoardingPoint] = useState("");
-	const [droppingPoint, setDroppingPoint] = useState("");
+  const [seatStatus, setSeatStatus] = useState(null);
+  const [selectedSeats, setSelectedSeats] = useState([]);
+  const [lockedSeatLabels, setLockedSeatLabels] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
+  const [seatSyncing, setSeatSyncing] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
-	const redirectToLogin = (nextSelectedSeats = selectedSeats) => {
-		try {
-			const payload = {
-				scheduleId,
-				selectedSeats: nextSelectedSeats,
-				boardingPoint,
-				droppingPoint,
-				passenger: {
-					name: passengerName,
-					age: passengerAge,
-					gender: passengerGender,
-					phone: passengerPhone,
-				},
-			};
-			sessionStorage.setItem("pendingBooking", JSON.stringify(payload));
-		} catch {
-			// ignore storage errors
-		}
-		const redirectPath = `${location.pathname || ""}${location.search || ""}`;
-		navigate(`/login?redirect=${encodeURIComponent(redirectPath || `/seats/${scheduleId}`)}`);
-	};
+  const [contactName, setContactName] = useState("");
+  const [contactPhone, setContactPhone] = useState("");
+  const [seatPassengers, setSeatPassengers] = useState({});
 
-	const showToast = (kind, text) => {
-		setToast({ kind, text, id: Date.now() });
-		if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-		toastTimerRef.current = window.setTimeout(() => setToast(null), 3500);
-	};
+  const [boardingPoint, setBoardingPoint] = useState("");
+  const [droppingPoint, setDroppingPoint] = useState("");
 
-	const submitEsewaForm = (formUrl, fields) => {
-		if (!formUrl || !fields || typeof fields !== "object") {
-			throw new Error("Payment gateway response missing form details");
-		}
-		const form = document.createElement("form");
-		form.method = "POST";
-		form.action = String(formUrl);
-		Object.entries(fields).forEach(([name, value]) => {
-			const input = document.createElement("input");
-			input.type = "hidden";
-			input.name = String(name);
-			input.value = String(value);
-			form.appendChild(input);
-		});
-		document.body.appendChild(form);
-		form.submit();
-	};
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  const selectedSeatsRef = useRef([]);
+  const pendingSeatOpsRef = useRef(0);
+  const isRedirectingToPaymentRef = useRef(false);
+  const holdExpiryNotifiedRef = useRef(false);
+  const [holdNowMs, setHoldNowMs] = useState(() => Date.now());
 
-	const refresh = async ({ silent = false } = {}) => {
-		if (!silent) setLoading(true);
-		if (!silent) setLoadError("");
-		try {
-			const data = await getSeatStatus(scheduleId);
-			setSeatStatus(data);
+  const [galleryOpen, setGalleryOpen] = useState(false);
+  const [galleryStartIndex, setGalleryStartIndex] = useState(0);
 
-			// Keep the UI selection aligned with server-side locks for this user.
-			if (currentUser?.id) {
-				const locks = Array.isArray(data?.lockedSeats) ? data.lockedSeats : [];
-				const mine = normalizeSeatNumbers(
-					locks
-						.filter((l) => String(l?.lockedBy?._id ?? l.lockedBy) === String(currentUser.id))
-						.map((l) => l.seatNumber)
-				);
-				setSelectedSeats(mine);
-			}
-			return data;
-		} catch (err) {
-			const msg = err?.response?.data?.message || err.message || "Failed to load seat status";
-			if (!silent) setLoadError(msg);
-			else showToast("error", msg);
-			return null;
-		} finally {
-			if (!silent) setLoading(false);
-		}
-	};
+  const showToast = (kind, text) => {
+    setToast({ kind, text, id: Date.now() });
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
+  };
 
-	useEffect(() => {
-		refresh();
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [scheduleId]);
+  const redirectToLogin = (nextSelectedSeats = selectedSeats) => {
+    if (!activeScheduleId) return;
 
-	useEffect(() => {
-		if (!currentUser?.id) return;
-		try {
-			const raw = sessionStorage.getItem("pendingBooking");
-			if (!raw) return;
-			const pending = JSON.parse(raw);
-			if (!pending || String(pending.scheduleId) !== String(scheduleId)) return;
-			if (Array.isArray(pending.selectedSeats) && pending.selectedSeats.length > 0) {
-				setSelectedSeats(normalizeSeatNumbers(pending.selectedSeats));
-			}
-			const p = pending.passenger || {};
-			if (p.name) setPassengerName(String(p.name));
-			if (p.age !== undefined) setPassengerAge(String(p.age));
-			if (p.gender) setPassengerGender(String(p.gender));
-			if (p.phone) setPassengerPhone(String(p.phone));
-			if (pending.boardingPoint) setBoardingPoint(String(pending.boardingPoint));
-			if (pending.droppingPoint) setDroppingPoint(String(pending.droppingPoint));
-			sessionStorage.removeItem("pendingBooking");
-			showToast("success", "Login successful. Continue your booking.");
-		} catch {
-			// ignore
-		}
-		// run when user becomes available
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [currentUser?.id, scheduleId]);
+    try {
+      const pendingPayload = {
+        scheduleId: activeScheduleId,
+        selectedSeats: nextSelectedSeats,
+        boardingPoint,
+        droppingPoint,
+        contact: {
+          name: contactName,
+          phone: contactPhone,
+        },
+        seatPassengers,
+      };
+      sessionStorage.setItem("pendingBooking", JSON.stringify(pendingPayload));
+    } catch {
+      // ignore storage errors
+    }
 
-	const toggleSeat = async (seatNumber) => {
-		if (actionLoading) return;
-		const isSelected = selectedSeats.includes(seatNumber);
+    const redirectPath = `${location.pathname || ""}${location.search || ""}`;
+    navigate(`/login?redirect=${encodeURIComponent(redirectPath || `/seats/${activeScheduleId}`)}`);
+  };
 
-		if (!currentUser?.id) {
-			const next = isSelected
-				? selectedSeats.filter((s) => s !== seatNumber)
-				: Array.from(new Set([...selectedSeats, seatNumber]));
-			redirectToLogin(next);
-			return;
-		}
+  const submitEsewaForm = (formUrl, fields) => {
+    if (!formUrl || !fields || typeof fields !== "object") {
+      throw new Error("Payment gateway response missing form details");
+    }
 
-		// Optimistic UI update.
-		setSelectedSeats((prev) => (prev.includes(seatNumber) ? prev.filter((s) => s !== seatNumber) : [...prev, seatNumber]));
-		setActionLoading(true);
-		try {
-			if (isSelected) {
-				await unlockSeats({ scheduleId, seats: [seatNumber] });
-			} else {
-				await lockSeats({ scheduleId, seats: [seatNumber] });
-			}
-			await refresh({ silent: true });
-		} catch (err) {
-			showToast("error", err?.response?.data?.message || err.message || (isSelected ? "Unlock failed" : "Lock failed"));
-			await refresh({ silent: true });
-		} finally {
-			setActionLoading(false);
-		}
-	};
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = String(formUrl);
 
-	const schedule = seatStatus?.schedule;
-	const routeStops = useMemo(() => {
-		const r = schedule?.route;
-		const src = String(r?.source || "").trim();
-		const dst = String(r?.destination || "").trim();
-		const midsRaw = Array.isArray(r?.stops) ? r.stops : [];
-		const mids = midsRaw.map((s) => String(toStopName(s) || "").trim()).filter(Boolean);
-		const list = [src, ...mids, dst].map((s) => String(s || "").trim()).filter(Boolean);
-		const seen = new Set();
-		return list.filter((s) => {
-			const k = stopKey(s);
-			if (!k) return false;
-			if (seen.has(k)) return false;
-			seen.add(k);
-			return true;
-		});
-	}, [schedule?.route]);
-	const stopIndexByKey = useMemo(() => {
-		const map = new Map();
-		routeStops.forEach((s, idx) => {
-			const k = stopKey(s);
-			if (!k) return;
-			if (!map.has(k)) map.set(k, idx);
-		});
-		return map;
-	}, [routeStops]);
-	const boardingOptions = useMemo(() => {
-		const arr = Array.isArray(schedule?.boardingPoints) ? schedule.boardingPoints : [];
-		return arr
-			.map((p) => ({
-				name: String(p?.name || "").trim(),
-				date: String(p?.date || "").trim(),
-				time: String(p?.time || "").trim(),
-			}))
-			.filter((p) => p.name)
-			.map((p) => ({ ...p, idx: stopIndexByKey.get(stopKey(p.name)) }))
-			.filter((p) => p.idx !== undefined)
-			.sort((a, b) => a.idx - b.idx);
-	}, [schedule?.boardingPoints, stopIndexByKey]);
-	const droppingOptions = useMemo(() => {
-		const arr = Array.isArray(schedule?.droppingPoints) ? schedule.droppingPoints : [];
-		return arr
-			.map((p) => ({
-				name: String(p?.name || "").trim(),
-				date: String(p?.date || "").trim(),
-				time: String(p?.time || "").trim(),
-			}))
-			.filter((p) => p.name)
-			.map((p) => ({ ...p, idx: stopIndexByKey.get(stopKey(p.name)) }))
-			.filter((p) => p.idx !== undefined)
-			.sort((a, b) => a.idx - b.idx);
-	}, [schedule?.droppingPoints, stopIndexByKey]);
-	const selectedBoarding = useMemo(() => {
-		const k = stopKey(boardingPoint);
-		return boardingOptions.find((p) => stopKey(p.name) === k) || null;
-	}, [boardingPoint, boardingOptions]);
-	const selectedDropping = useMemo(() => {
-		const k = stopKey(droppingPoint);
-		return droppingOptions.find((p) => stopKey(p.name) === k) || null;
-	}, [droppingPoint, droppingOptions]);
-	const validDroppingOptions = useMemo(() => {
-		const bIdx = selectedBoarding?.idx;
-		if (bIdx === undefined) return droppingOptions;
-		return droppingOptions.filter((p) => p.idx > bIdx);
-	}, [droppingOptions, selectedBoarding?.idx]);
+    Object.entries(fields).forEach(([name, value]) => {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = String(name);
+      input.value = String(value);
+      form.appendChild(input);
+    });
 
-	useEffect(() => {
-		if (!droppingPoint) return;
-		const k = stopKey(droppingPoint);
-		if (!validDroppingOptions.some((p) => stopKey(p.name) === k)) {
-			setDroppingPoint("");
-		}
-	}, [droppingPoint, validDroppingOptions]);
-	const busImg = schedule?.bus?.imageUrl ? toAbsoluteAssetUrl(schedule.bus.imageUrl) : "";
-	const busImages = busImg ? [busImg, busImg, busImg] : [];
-	const pricePerSeat = Number.isFinite(Number(schedule?.price)) ? Number(schedule.price) : 0;
-	const totalPrice = pricePerSeat * selectedSeats.length;
-	const durationText = useMemo(() => {
-		const minutes = Number(schedule?.durationMinutes);
-		if (!Number.isFinite(minutes) || minutes <= 0) return "—";
-		const h = Math.floor(minutes / 60);
-		const m = minutes % 60;
-		if (h && m) return `${h}h ${m}m`;
-		if (h) return `${h}h`;
-		return `${m}m`;
-	}, [schedule?.durationMinutes]);
+    document.body.appendChild(form);
+    form.submit();
+  };
 
-	const myLockedSet = useMemo(() => {
-		const locks = Array.isArray(seatStatus?.lockedSeats) ? seatStatus.lockedSeats : [];
-		const mine = locks
-			.filter((l) => String(l?.lockedBy?._id ?? l.lockedBy) === String(currentUser?.id))
-			.map((l) => l.seatNumber);
-		return new Set(normalizeSeatNumbers(mine));
-	}, [seatStatus?.lockedSeats, currentUser?.id]);
+  const refresh = async ({ silent = false, syncSelectionWithLocks = false } = {}) => {
+    if (!activeScheduleId) return null;
 
-	const allSelectedLockedByMe = useMemo(() => selectedSeats.length > 0 && selectedSeats.every((n) => myLockedSet.has(n)), [selectedSeats, myLockedSet]);
+    if (!silent) {
+      setLoading(true);
+      setLoadError("");
+    }
 
-	const passenger = useMemo(
-		() => ({ name: passengerName, age: passengerAge, gender: passengerGender, phone: passengerPhone }),
-		[passengerName, passengerAge, passengerGender, passengerPhone]
-	);
-	const passengerValidation = useMemo(() => validatePassenger(passenger), [passenger]);
+    try {
+      const data = await getSeatStatus(activeScheduleId);
+      setSeatStatus(data);
 
-	const onConfirm = async () => {
-		if (selectedSeats.length === 0) {
-			showToast("error", "Select at least one seat");
-			return;
-		}
-		if (!selectedBoarding?.name) {
-			showToast("error", "Select a boarding point");
-			return;
-		}
-		if (!selectedDropping?.name) {
-			showToast("error", "Select a dropping point");
-			return;
-		}
-		if (selectedDropping.idx <= selectedBoarding.idx) {
-			showToast("error", "Dropping point must be after boarding point");
-			return;
-		}
-		if (stopKey(selectedDropping.name) === stopKey(selectedBoarding.name)) {
-			showToast("error", "Boarding and dropping points must be different");
-			return;
-		}
-		const boardingMs = parseIsoDateTimeMs(selectedBoarding.date, selectedBoarding.time);
-		const droppingMs = parseIsoDateTimeMs(selectedDropping.date, selectedDropping.time);
-		if (!Number.isFinite(boardingMs) || !Number.isFinite(droppingMs)) {
-			showToast("error", "Boarding/dropping times are missing or invalid");
-			return;
-		}
-		if (droppingMs <= boardingMs) {
-			showToast("error", "Dropping time must be after boarding time");
-			return;
-		}
-		if (!currentUser?.id) {
-			redirectToLogin(selectedSeats);
-			return;
-		}
-		if (!passengerValidation.ok) {
-			showToast("error", passengerValidation.message || "Passenger details are required");
-			return;
-		}
+      const myLockedSeats = getMyLockedSeatLabels(data?.lockedSeats, currentUser?.id);
+      setLockedSeatLabels(myLockedSeats);
 
-		setActionLoading(true);
-		try {
-			if (!allSelectedLockedByMe) {
-				const missing = selectedSeats.filter((s) => !myLockedSet.has(s));
-				if (missing.length > 0) {
-					await lockSeats({ scheduleId, seats: missing });
-					await refresh({ silent: true });
-				}
-			}
+      if (currentUser?.id && syncSelectionWithLocks) {
+        setSelectedSeats(myLockedSeats);
+      }
 
-			const payment = await initiateEsewaPayment({
-				scheduleId,
-				seats: selectedSeats,
-				boardingPoint: selectedBoarding.name,
-				droppingPoint: selectedDropping.name,
-				passenger: {
-					name: String(passengerName || "").trim(),
-					age: Number(passengerAge),
-					gender: String(passengerGender || "").toLowerCase(),
-					phone: String(passengerPhone || "").trim(),
-				},
-			});
-			showToast("success", "Redirecting to eSewa for payment...");
-			submitEsewaForm(payment.formUrl, payment.fields);
-		} catch (err) {
-			if (err?.response?.status === 401) {
-				redirectToLogin();
-				return;
-			}
-			showToast("error", err?.response?.data?.message || err.message || "Booking failed");
-		} finally {
-			setActionLoading(false);
-		}
-	};
+      return data;
+    } catch (error) {
+      const message = error?.response?.data?.message || error?.message || "Failed to load seat status";
+      if (!silent) setLoadError(message);
+      else showToast("error", message);
+      return null;
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
 
-	useEffect(() => {
-		return () => {
-			if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-		};
-	}, []);
+  const releaseSelectedSeats = async ({ silent = true } = {}) => {
+    const seatsToRelease = normalizeSeatLabels(selectedSeatsRef.current);
+    if (!activeScheduleId || seatsToRelease.length === 0) return true;
 
-	const onProceed = async () => {
-		if (selectedSeats.length === 0) {
-			showToast("error", "Select at least one seat");
-			return;
-		}
-		if (!currentUser?.id) {
-			redirectToLogin(selectedSeats);
-			return;
-		}
-		await onConfirm();
-	};
+    if (!currentUser?.id) {
+      setSelectedSeats([]);
+      setLockedSeatLabels([]);
+      selectedSeatsRef.current = [];
+      setSeatPassengers({});
+      return true;
+    }
 
-	if (loading) {
-		return (
-			<div className="min-h-screen bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-10 text-sm text-slate-200">
-				Loading...
-			</div>
-		);
-	}
-	if (loadError && !seatStatus) {
-		return (
-			<div className="min-h-screen bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 px-4 py-10 text-sm text-rose-200">
-				{loadError}
-			</div>
-		);
-	}
+    try {
+      await unlockSeats({ scheduleId: activeScheduleId, seats: seatsToRelease });
+      setSelectedSeats([]);
+      setLockedSeatLabels([]);
+      selectedSeatsRef.current = [];
+      setSeatPassengers({});
+      await refresh({ silent: true });
+      if (!silent) showToast("success", "Seat hold cancelled. Seats are now free.");
+      return true;
+    } catch (error) {
+      if (!silent) {
+        const message = error?.response?.data?.message || error?.message || "Failed to release selected seats";
+        showToast("error", message);
+      }
+      return false;
+    }
+  };
 
-	return (
-		<div className="min-h-screen bg-linear-to-b from-slate-950 via-slate-900 to-slate-950 text-slate-100">
-			{/* Toast */}
-			{toast ? (
-				<div
-					key={toast.id}
-					className={`fixed right-4 top-4 z-50 max-w-[92vw] rounded-2xl px-4 py-3 text-sm shadow-lg ring-1 backdrop-blur ${
-						toast.kind === "success"
-							? "bg-emerald-950/70 text-emerald-100 ring-emerald-900/60"
-							: toast.kind === "error"
-								? "bg-rose-950/70 text-rose-100 ring-rose-900/60"
-								: "bg-slate-950/70 text-slate-100 ring-slate-800"
-					}`}
-				>
-					{toast.text}
-				</div>
-			) : null}
+  const removeSeatsFromSelection = (seatsToRemove) => {
+    const normalizedToRemove = normalizeSeatLabels(seatsToRemove);
+    if (normalizedToRemove.length === 0) return [];
 
-			<div className="mx-auto max-w-6xl px-4 py-8">
-				<div>
-					<Link to="/search" className="text-sm font-semibold text-slate-300 hover:text-slate-100">
-						← Back to Search
-					</Link>
-				</div>
+    const removeSet = new Set(normalizedToRemove);
 
-				<div className="mt-4">
-					<div className="text-2xl font-extrabold text-slate-100">{schedule?.bus?.name || "Seats"}</div>
-					<div className="mt-1 text-sm text-slate-300">Select your seats</div>
-					{schedule ? (
-						<div className="mt-1 text-xs text-slate-400">
-							{schedule.route?.source} → {schedule.route?.destination} • {schedule.date} • {schedule.time}
-						</div>
-					) : null}
-				</div>
+    setSelectedSeats((prev) => {
+      const next = normalizeSeatLabels(prev.filter((seat) => !removeSet.has(normalizeSeatLabel(seat))));
+      selectedSeatsRef.current = next;
+      return next;
+    });
 
-				<div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1fr),360px]">
-				{/* Left: seat map */}
-				<div className="flex flex-col rounded-2xl border border-slate-700/50 bg-slate-900/40 p-5 shadow-sm backdrop-blur sm:p-6">
-					<div className="flex flex-wrap items-start justify-between gap-3">
-						<div>
-							<div className="text-sm font-semibold text-slate-100">Select Seats</div>
-							<div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-slate-300">
-								<span className="inline-flex items-center gap-2">
-									<span className="h-3 w-3 rounded bg-slate-700 ring-1 ring-slate-600" /> Available
-								</span>
-								<span className="inline-flex items-center gap-2">
-									<span className="h-3 w-3 rounded bg-emerald-500" /> Selected
-								</span>
-								<span className="inline-flex items-center gap-2">
-									<span className="h-3 w-3 rounded bg-slate-950/60 ring-1 ring-slate-800" /> Booked
-								</span>
-							</div>
-						</div>
-						<div className="text-xs text-slate-300">
-							Selected: <span className="font-semibold text-slate-100">{selectedSeats.length ? selectedSeats.join(", ") : "None"}</span>
-						</div>
-					</div>
+    setLockedSeatLabels((prev) => normalizeSeatLabels(prev.filter((seat) => !removeSet.has(normalizeSeatLabel(seat)))));
 
-					<div className="mt-6 flex flex-1 items-center justify-center">
-						<SeatMap
-							totalSeats={seatStatus?.totalSeats || 0}
-							bookedSeats={seatStatus?.bookedSeats || []}
-							lockedSeats={seatStatus?.lockedSeats || []}
-							selectedSeats={selectedSeats}
-							myUserId={currentUser?.id}
-							onToggleSeat={toggleSeat}
-							showLegend={false}
-						/>
-					</div>
-				</div>
+    setSeatPassengers((prev) => {
+      if (!prev || typeof prev !== "object") return prev;
+      const next = { ...prev };
+      normalizedToRemove.forEach((seatLabel) => {
+        delete next[seatLabel];
+      });
+      return next;
+    });
 
-				{/* Right: trip + passenger details */}
-				<div className="flex flex-col rounded-2xl border border-slate-700/50 bg-slate-900/40 p-5 shadow-sm backdrop-blur sm:p-6">
-					<div className="text-sm font-semibold text-slate-100">Bus Details</div>
+    return normalizedToRemove;
+  };
 
-					<div className="mt-4 flex flex-wrap gap-2">
-						{busImages.length ? (
-							busImages.map((src, idx) => (
-								<div key={idx} className="h-14 w-20 overflow-hidden rounded-xl bg-slate-950/40 ring-1 ring-slate-800 sm:h-16 sm:w-24">
-									<img
-										src={src}
-										alt={schedule?.bus?.name || "Bus"}
-										loading="lazy"
-										decoding="async"
-										className="h-full w-full object-cover"
-									/>
-								</div>
-							))
-						) : (
-							<div className="flex h-14 w-20 items-center justify-center rounded-xl bg-slate-950/40 text-xs text-slate-500 ring-1 ring-slate-800 sm:h-16 sm:w-24">
-								No image
-							</div>
-						)}
-					</div>
+  const ensureSelectedSeatsLocked = async () => {
+    const seatsToLock = normalizeSeatLabels(selectedSeatsRef.current);
 
-					<div className="my-5 h-px bg-slate-700/50" />
+    if (!activeScheduleId || seatsToLock.length === 0) {
+      return { ok: false, message: "Select at least one seat" };
+    }
 
-					<div>
-						<div className="text-xs text-slate-400">Bus type</div>
-						<div className="mt-1 text-sm font-semibold text-slate-100">{schedule?.bus?.type || "—"}</div>
-						{schedule?.bus?.vehicleNumber ? (
-							<div className="mt-1 text-xs text-slate-400">Vehicle: {schedule.bus.vehicleNumber}</div>
-						) : null}
-					</div>
+    if (!currentUser?.id) {
+      return { ok: false, message: "Please login to continue booking" };
+    }
 
-					<div className="my-5 h-px bg-slate-700/50" />
+    const classifyUnavailableSeats = (statusData, missingSeats) => {
+      const normalizedMissing = normalizeSeatLabels(missingSeats);
+      const bookedSet = new Set(normalizeSeatLabels(statusData?.bookedSeats || []));
+      const lockedByOtherSet = new Set(
+        (Array.isArray(statusData?.lockedSeats) ? statusData.lockedSeats : [])
+          .filter((lock) => {
+            const lockOwnerId = lock?.lockedBy?._id ?? lock?.lockedBy;
+            if (lockOwnerId == null) return false;
+            return String(lockOwnerId) !== String(currentUser?.id || "");
+          })
+          .map((lock) => lock?.seatLabel ?? lock?.seatNumber)
+          .map((seat) => normalizeSeatLabel(seat))
+          .filter(Boolean)
+      );
 
-					<div className="grid grid-cols-3 items-end gap-3">
-						<div>
-							<div className="text-xs text-slate-400">Departure</div>
-							<div className="mt-1 text-sm font-extrabold text-slate-100">{schedule?.time || "—"}</div>
-						</div>
-						<div className="text-center">
-							<div className="text-xs text-slate-400">Duration</div>
-							<div className="mt-1 text-xs font-semibold text-slate-200">{durationText}</div>
-						</div>
-						<div className="text-right">
-							<div className="text-xs text-slate-400">Arrival</div>
-							<div className="mt-1 text-sm font-extrabold text-slate-100">{schedule?.arrivalTime || "—"}</div>
-						</div>
-					</div>
+      return normalizedMissing.filter((seatLabel) => bookedSet.has(seatLabel) || lockedByOtherSet.has(seatLabel));
+    };
 
-					{Array.isArray(schedule?.amenities) && schedule.amenities.length > 0 ? (
-						<>
-							<div className="my-5 h-px bg-slate-700/50" />
-							<div>
-								<div className="text-xs font-semibold text-slate-300">Amenities</div>
-								<div className="mt-3 flex flex-wrap gap-2 text-xs">
-									{schedule.amenities.map((a) => (
-										<span key={a} className="rounded-full bg-slate-950/30 px-2 py-1 font-semibold text-slate-200 ring-1 ring-slate-800">
-											{a}
-										</span>
-									))}
-								</div>
-							</div>
-						</>
-					) : null}
+    const reconcileSeatLocks = async (requestedSeats) => {
+      const latest = await refresh({ silent: true });
+      const latestLocks = getMyLockedSeatLabels(latest?.lockedSeats, currentUser?.id);
+      const latestLockSet = new Set(latestLocks);
+      const lockedForSelection = requestedSeats.filter((seatLabel) => latestLockSet.has(seatLabel));
+      const missingLocks = requestedSeats.filter((seatLabel) => !latestLockSet.has(seatLabel));
 
-					<div className="my-5 h-px bg-slate-700/50" />
+      setLockedSeatLabels(lockedForSelection);
 
-					<div>
-						<div className="flex items-center justify-between gap-3">
-							<div className="text-xs font-semibold text-slate-300">Selected Seats ({selectedSeats.length})</div>
-							<div className="text-xs text-slate-400">Price / seat: {formatCurrency(pricePerSeat)}</div>
-						</div>
-						{selectedSeats.length ? (
-							<div className="mt-3 flex flex-wrap gap-2">
-								{selectedSeats.map((n) => (
-									<span key={n} className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-xs font-bold text-emerald-200 ring-1 ring-emerald-500/30">
-										Seat {n}
-									</span>
-								))}
-							</div>
-						) : (
-							<div className="mt-2 text-xs text-slate-400">No seats selected</div>
-						)}
-					</div>
+      return {
+        latest,
+        lockedForSelection,
+        missingLocks,
+      };
+    };
 
-					<div className="my-5 h-px bg-slate-700/50" />
+    let lockRequestError = null;
+    let lockPayload = null;
 
-					<div>
-						<div className="text-xs font-semibold text-slate-300">Passenger</div>
-						<div className="mt-3 grid gap-3">
-							<div>
-								<div className="text-xs font-semibold text-slate-300">Pickup & Drop</div>
-								<div className="mt-3 grid gap-3">
-									<div>
-										<label className="block text-[11px] font-semibold text-slate-400">Boarding point</label>
-										<div className="mt-2 max-h-40 overflow-y-auto rounded-xl border border-slate-700/60 bg-slate-950/20 p-2">
-											{boardingOptions.length ? (
-												<div className="grid gap-2">
-													{boardingOptions.map((p) => {
-														const active = stopKey(p.name) === stopKey(boardingPoint);
-														const isStart = stopKey(p.name) === stopKey(schedule?.route?.source);
-														return (
-															<button
-																key={p.name}
-																type="button"
-																onClick={() => setBoardingPoint(p.name)}
-																className={`w-full rounded-xl border px-3 py-2 text-left text-sm shadow-sm outline-none transition ${
-																active
-																	? "border-emerald-500/40 bg-emerald-500/10"
-																	: "border-slate-700/60 bg-slate-950/30 hover:bg-slate-950/50"
-															}`}
-															>
-																<div className="flex items-start justify-between gap-3">
-																	<div className="font-semibold text-slate-100">{p.name}</div>
-																	<div className="text-[11px] font-semibold text-slate-300">
-																		{[p.date, p.time].filter(Boolean).join(" • ")}
-																	</div>
-																</div>
-																{isStart ? <div className="mt-1 text-[11px] font-semibold text-emerald-200">Start</div> : null}
-															</button>
-														);
-													})}
-												</div>
-											) : (
-												<div className="px-2 py-2 text-xs text-slate-400">No boarding points configured for this trip.</div>
-											)}
-										</div>
-									</div>
+    try {
+      lockPayload = await lockSeats({ scheduleId: activeScheduleId, seats: seatsToLock });
+    } catch (error) {
+      lockRequestError = error;
+    }
 
-									<div>
-										<label className="block text-[11px] font-semibold text-slate-400">Dropping point</label>
-										<div className="mt-2 max-h-44 overflow-y-auto rounded-xl border border-slate-700/60 bg-slate-950/20 p-2">
-											{validDroppingOptions.length ? (
-												<div className="grid gap-2">
-													{validDroppingOptions.map((p) => {
-														const active = stopKey(p.name) === stopKey(droppingPoint);
-														const isFinal = stopKey(p.name) === stopKey(schedule?.route?.destination);
-														return (
-															<button
-																key={p.name}
-																type="button"
-																onClick={() => setDroppingPoint(p.name)}
-																className={`w-full rounded-xl border px-3 py-2 text-left text-sm shadow-sm outline-none transition ${
-																active
-																	? "border-emerald-500/40 bg-emerald-500/10"
-																	: "border-slate-700/60 bg-slate-950/30 hover:bg-slate-950/50"
-															}`}
-															>
-																<div className="flex items-start justify-between gap-3">
-																	<div className="font-semibold text-slate-100">{p.name}</div>
-																	<div className="text-[11px] font-semibold text-slate-300">
-																		{[p.date, p.time].filter(Boolean).join(" • ")}
-																	</div>
-																</div>
-																{isFinal ? <div className="mt-1 text-[11px] font-semibold text-emerald-200">Final stop</div> : null}
-															</button>
-														);
-													})}
-												</div>
-											) : selectedBoarding?.name ? (
-												<div className="px-2 py-2 text-xs text-slate-400">No valid drop points after the selected boarding stop.</div>
-											) : (
-												<div className="px-2 py-2 text-xs text-slate-400">Select a boarding point first.</div>
-											)}
-										</div>
-									</div>
-								</div>
-							</div>
+    let reconciliation = await reconcileSeatLocks(seatsToLock);
+    if (reconciliation.missingLocks.length > 0) {
+      try {
+        await lockSeats({ scheduleId: activeScheduleId, seats: reconciliation.missingLocks });
+      } catch (retryError) {
+        if (!lockRequestError) lockRequestError = retryError;
+      }
 
-							<div>
-								<label className="block text-[11px] font-semibold text-slate-400">Name</label>
-								<input
-									value={passengerName}
-									onChange={(e) => setPassengerName(e.target.value)}
-									placeholder="Passenger full name"
-									className="mt-2 w-full rounded-xl border border-slate-700/60 bg-slate-950/30 px-3 py-2.5 text-sm text-slate-100 shadow-sm outline-none focus:border-slate-600 focus:ring-2 focus:ring-emerald-300/20"
-								/>
-							</div>
-							<div className="grid grid-cols-2 gap-3">
-								<div>
-									<label className="block text-[11px] font-semibold text-slate-400">Age</label>
-									<input
-										type="number"
-										min={1}
-										max={120}
-										value={passengerAge}
-										onChange={(e) => setPassengerAge(e.target.value)}
-										placeholder="e.g., 28"
-										className="mt-2 w-full rounded-xl border border-slate-700/60 bg-slate-950/30 px-3 py-2.5 text-sm text-slate-100 shadow-sm outline-none focus:border-slate-600 focus:ring-2 focus:ring-emerald-300/20"
-									/>
-								</div>
-								<div>
-									<label className="block text-[11px] font-semibold text-slate-400">Gender</label>
-									<select
-										value={passengerGender}
-										onChange={(e) => setPassengerGender(e.target.value)}
-										className="mt-2 w-full rounded-xl border border-slate-700/60 bg-slate-950/30 px-3 py-2.5 text-sm text-slate-100 shadow-sm outline-none focus:border-slate-600 focus:ring-2 focus:ring-emerald-300/20"
-									>
-										<option value="">Select</option>
-										<option value="male">Male</option>
-										<option value="female">Female</option>
-										<option value="other">Other</option>
-									</select>
-								</div>
-							</div>
-							<div>
-								<label className="block text-[11px] font-semibold text-slate-400">Phone</label>
-								<input
-									value={passengerPhone}
-									onChange={(e) => setPassengerPhone(e.target.value)}
-									placeholder="e.g., 98xxxxxxxx"
-									className="mt-2 w-full rounded-xl border border-slate-700/60 bg-slate-950/30 px-3 py-2.5 text-sm text-slate-100 shadow-sm outline-none focus:border-slate-600 focus:ring-2 focus:ring-emerald-300/20"
-								/>
-								<p className="mt-2 text-[11px] text-slate-400">Your details are required for the ticket.</p>
-							</div>
-						</div>
-					</div>
+      reconciliation = await reconcileSeatLocks(seatsToLock);
+    }
 
-					<div className="my-5 h-px bg-slate-700/50" />
+    if (reconciliation.missingLocks.length > 0) {
+      const unavailableSeats = classifyUnavailableSeats(reconciliation.latest, reconciliation.missingLocks);
+      if (unavailableSeats.length > 0) {
+        removeSeatsFromSelection(unavailableSeats);
+        return {
+          ok: false,
+          failedSeats: unavailableSeats,
+          message: `Some seats are no longer available: ${unavailableSeats.join(", ")}`,
+        };
+      }
 
-					<div className="space-y-3 text-sm">
-						<div className="flex items-center justify-between">
-							<span className="text-slate-300">Selected seats</span>
-							<span className="font-semibold text-slate-100">{selectedSeats.length || 0}</span>
-						</div>
-						<div className="flex items-center justify-between">
-							<span className="text-slate-300">Price / seat</span>
-							<span className="font-semibold text-slate-100">{formatCurrency(pricePerSeat)}</span>
-						</div>
-						<div className="flex items-center justify-between">
-							<span className="text-slate-300">Total Amount</span>
-							<span className="text-base font-extrabold text-emerald-400">{formatCurrency(totalPrice)}</span>
-						</div>
-						<div className="pt-1 text-xs text-slate-400">Seats are auto-locked for ~10 minutes after selection.</div>
-					</div>
+      const fallbackFailed = lockRequestError ? parseLockFailureSeats(lockRequestError) : [];
+      const missingLabelText = normalizeSeatLabels(
+        fallbackFailed.length > 0 ? fallbackFailed : reconciliation.missingLocks
+      ).join(", ");
 
-					<div className="mt-6 grid gap-3">
-						<button
-							disabled={actionLoading || selectedSeats.length === 0}
-							onClick={onProceed}
-							className="inline-flex w-full items-center justify-center rounded-xl bg-slate-100 px-4 py-3 text-sm font-extrabold text-slate-950 shadow-sm hover:bg-white disabled:opacity-60"
-						>
-							Proceed to Book
-						</button>
-						<button
-							disabled={actionLoading}
-							onClick={() => refresh({ silent: true })}
-							className="inline-flex w-full items-center justify-center rounded-xl border border-slate-700/60 bg-slate-950/20 px-4 py-2.5 text-sm font-semibold text-slate-100 shadow-sm hover:bg-slate-950/40 disabled:opacity-60"
-						>
-							Refresh
-						</button>
-					</div>
-				</div>
-				</div>
-			</div>
-		</div>
-	);
+      return {
+        ok: false,
+        failedSeats: reconciliation.missingLocks,
+        message: missingLabelText
+          ? `Unable to secure seat lock for: ${missingLabelText}. Please try again.`
+          : "Seat lock required before payment",
+      };
+    }
+
+    const lockResult = parseLockResult(lockPayload, seatsToLock);
+    const lockedSeatSet = new Set(reconciliation.lockedForSelection);
+    const payloadMissingSeats = lockResult.failedSeats.length > 0
+      ? lockResult.failedSeats
+      : seatsToLock.filter((seatLabel) => !lockedSeatSet.has(seatLabel));
+
+    if (payloadMissingSeats.length > 0) {
+      return {
+        ok: false,
+        failedSeats: payloadMissingSeats,
+        message: "Seat lock required before payment",
+      };
+    }
+
+    return { ok: true, lockedSeats: reconciliation.lockedForSelection };
+  };
+
+  useEffect(() => {
+    refresh({ syncSelectionWithLocks: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScheduleId]);
+
+  useEffect(() => {
+    selectedSeatsRef.current = selectedSeats;
+  }, [selectedSeats]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setHoldNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (isRedirectingToPaymentRef.current) return;
+
+      const seatsToRelease = normalizeSeatLabels(selectedSeatsRef.current);
+      if (!activeScheduleId || !currentUser?.id || seatsToRelease.length === 0) return;
+
+      // Best-effort unlock when leaving seat page.
+      void unlockSeats({ scheduleId: activeScheduleId, seats: seatsToRelease });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScheduleId, currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser?.id || !activeScheduleId) return;
+
+    try {
+      const raw = sessionStorage.getItem("pendingBooking");
+      if (!raw) return;
+
+      const pending = JSON.parse(raw);
+      if (!pending || String(pending.scheduleId) !== String(activeScheduleId)) return;
+
+      if (Array.isArray(pending.selectedSeats) && pending.selectedSeats.length > 0) {
+        setSelectedSeats(normalizeSeatLabels(pending.selectedSeats));
+      }
+
+      const contact = pending.contact || {};
+      if (contact.name) setContactName(String(contact.name));
+      if (contact.phone) setContactPhone(String(contact.phone));
+
+      if (pending.boardingPoint) setBoardingPoint(String(pending.boardingPoint));
+      if (pending.droppingPoint) setDroppingPoint(String(pending.droppingPoint));
+
+      if (pending.seatPassengers && typeof pending.seatPassengers === "object") {
+        setSeatPassengers(pending.seatPassengers);
+      }
+
+      sessionStorage.removeItem("pendingBooking");
+      showToast("success", "Login successful. Continue your booking.");
+    } catch {
+      // ignore pending parsing failures
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScheduleId, currentUser?.id]);
+
+  useEffect(() => {
+    setSeatPassengers((prev) => {
+      const next = {};
+      selectedSeats.forEach((seatLabel, index) => {
+        const existing = prev?.[seatLabel] || {};
+        next[seatLabel] = {
+          name: existing.name || (index === 0 ? String(contactName || "").trim() : ""),
+          phone: existing.phone || String(contactPhone || "").trim(),
+          gender: normalizeGender(existing.gender) || "",
+          age: existing.age || "",
+          idNumber: existing.idNumber || "",
+        };
+      });
+      return next;
+    });
+  }, [selectedSeats, contactName, contactPhone]);
+
+  const toggleSeat = async (seatLabel) => {
+    if (!activeScheduleId) return;
+
+    const normalizedSeatLabel = normalizeSeatLabel(seatLabel);
+    if (!normalizedSeatLabel) return;
+
+    const isSelected = selectedSeatsRef.current.includes(normalizedSeatLabel);
+
+    const updateLocalSeatLock = (shouldLock) => {
+      setSeatStatus((prev) => {
+        if (!prev || typeof prev !== "object") return prev;
+
+        const existingLocks = Array.isArray(prev.lockedSeats) ? prev.lockedSeats : [];
+        const cleanedLocks = existingLocks.filter(
+          (lock) => normalizeSeatLabel(lock?.seatLabel ?? lock?.seatNumber) !== normalizedSeatLabel
+        );
+
+        if (!shouldLock) {
+          return {
+            ...prev,
+            lockedSeats: cleanedLocks,
+          };
+        }
+
+        return {
+          ...prev,
+          lockedSeats: [
+            ...cleanedLocks,
+            {
+              seatLabel: normalizedSeatLabel,
+              seatNumber: normalizedSeatLabel,
+              lockedBy: currentUser?.id || null,
+              lockedAt: new Date().toISOString(),
+            },
+          ],
+        };
+      });
+
+      setLockedSeatLabels((prev) => {
+        const cleaned = prev.filter((seat) => normalizeSeatLabel(seat) !== normalizedSeatLabel);
+        if (!shouldLock) return cleaned;
+        return normalizeSeatLabels([...cleaned, normalizedSeatLabel]);
+      });
+    };
+
+    if (!currentUser?.id) {
+      const nextSeats = isSelected
+        ? selectedSeatsRef.current.filter((seat) => seat !== normalizedSeatLabel)
+        : normalizeSeatLabels([...selectedSeatsRef.current, normalizedSeatLabel]);
+      redirectToLogin(nextSeats);
+      return;
+    }
+
+    setSelectedSeats((prev) => {
+      const next = prev.includes(normalizedSeatLabel)
+        ? prev.filter((seat) => seat !== normalizedSeatLabel)
+        : normalizeSeatLabels([...prev, normalizedSeatLabel]);
+      selectedSeatsRef.current = next;
+      return next;
+    });
+    updateLocalSeatLock(!isSelected);
+
+    pendingSeatOpsRef.current += 1;
+    setSeatSyncing(true);
+
+    try {
+      if (isSelected) await unlockSeats({ scheduleId: activeScheduleId, seats: [normalizedSeatLabel] });
+      else await lockSeats({ scheduleId: activeScheduleId, seats: [normalizedSeatLabel] });
+    } catch (error) {
+      const message = error?.response?.data?.message || error?.message || (isSelected ? "Unlock failed" : "Lock failed");
+      showToast("error", message);
+
+      // Revert local optimistic state on failure.
+      setSelectedSeats((prev) => {
+        const next = isSelected
+          ? normalizeSeatLabels([...prev, normalizedSeatLabel])
+          : prev.filter((seat) => seat !== normalizedSeatLabel);
+        selectedSeatsRef.current = next;
+        return next;
+      });
+      updateLocalSeatLock(isSelected);
+      await refresh({ silent: true });
+    } finally {
+      pendingSeatOpsRef.current = Math.max(0, pendingSeatOpsRef.current - 1);
+      if (pendingSeatOpsRef.current === 0) {
+        setSeatSyncing(false);
+      }
+    }
+  };
+
+  const handleContactChange = (field, value) => {
+    if (field === "name") setContactName(value);
+    if (field === "phone") setContactPhone(value);
+
+    setSeatPassengers((prev) => {
+      if (!selectedSeats.length) return prev;
+      const firstSeat = selectedSeats[0];
+      const existing = prev?.[firstSeat] || {};
+
+      if (field === "name" && !String(existing.name || "").trim()) {
+        return {
+          ...prev,
+          [firstSeat]: {
+            ...existing,
+            name: value,
+          },
+        };
+      }
+
+      if (field === "phone" && !String(existing.phone || "").trim()) {
+        return {
+          ...prev,
+          [firstSeat]: {
+            ...existing,
+            phone: value,
+          },
+        };
+      }
+
+      return prev;
+    });
+  };
+
+  const handleSeatPassengerChange = (seatLabel, field, value) => {
+    setSeatPassengers((prev) => ({
+      ...prev,
+      [seatLabel]: {
+        ...(prev?.[seatLabel] || {}),
+        [field]: value,
+      },
+    }));
+  };
+
+  const schedule = seatStatus?.schedule;
+
+  const boardingOptions = useMemo(() => {
+    const points = Array.isArray(schedule?.boardingPoints) ? schedule.boardingPoints : [];
+
+    return points
+      .map((point) => ({
+        name: String(point?.name || "").trim(),
+        date: String(point?.date || "").trim(),
+        time: String(point?.time || "").trim(),
+        order: Number.isFinite(Number(point?.order)) && Number(point.order) > 0
+          ? Math.trunc(Number(point.order))
+          : null,
+      }))
+      .filter((point) => point.name)
+      .map((point, idx) => ({
+        ...point,
+        idx: Number.isFinite(point.order) ? point.order - 1 : idx,
+      }))
+      .sort((a, b) => a.idx - b.idx || a.name.localeCompare(b.name));
+  }, [schedule?.boardingPoints]);
+
+  const droppingOptions = useMemo(() => {
+    const points = Array.isArray(schedule?.droppingPoints) ? schedule.droppingPoints : [];
+    const boardingMaxIdx = boardingOptions.reduce((max, point) => Math.max(max, Number(point?.idx) || 0), 0);
+
+    return points
+      .map((point) => ({
+        name: String(point?.name || "").trim(),
+        date: String(point?.date || "").trim(),
+        time: String(point?.time || "").trim(),
+        order: Number.isFinite(Number(point?.order)) && Number(point.order) > 0
+          ? Math.trunc(Number(point.order))
+          : null,
+      }))
+      .filter((point) => point.name)
+      .map((point, idx) => ({
+        ...point,
+        idx: Number.isFinite(point.order) ? point.order - 1 : boardingMaxIdx + idx + 1,
+      }))
+      .sort((a, b) => a.idx - b.idx || a.name.localeCompare(b.name));
+  }, [boardingOptions, schedule?.droppingPoints]);
+
+  const selectedBoarding = useMemo(() => {
+    const key = stopKey(boardingPoint);
+    return boardingOptions.find((point) => stopKey(point.name) === key) || null;
+  }, [boardingPoint, boardingOptions]);
+
+  const validDroppingOptions = useMemo(() => {
+    const boardingIdx = selectedBoarding?.idx;
+    if (boardingIdx === undefined) return droppingOptions;
+    return droppingOptions.filter((point) => point.idx > boardingIdx);
+  }, [droppingOptions, selectedBoarding?.idx]);
+
+  const selectedDropping = useMemo(() => {
+    const key = stopKey(droppingPoint);
+    return validDroppingOptions.find((point) => stopKey(point.name) === key) || null;
+  }, [droppingPoint, validDroppingOptions]);
+
+  useEffect(() => {
+    if (!droppingPoint) return;
+    const exists = validDroppingOptions.some((point) => stopKey(point.name) === stopKey(droppingPoint));
+    if (!exists) setDroppingPoint("");
+  }, [droppingPoint, validDroppingOptions]);
+
+  const seatLayout = useMemo(() => (Array.isArray(seatStatus?.seatLayout) ? seatStatus.seatLayout : []), [seatStatus?.seatLayout]);
+
+  const seatPriceMap = useMemo(() => {
+    if (!seatStatus?.seatPriceMap || typeof seatStatus.seatPriceMap !== "object") return {};
+    return seatStatus.seatPriceMap;
+  }, [seatStatus?.seatPriceMap]);
+
+  const seatMetaByLabel = useMemo(() => {
+    const map = new Map();
+
+    seatLayout.forEach((deck, deckIndex) => {
+      const deckNumber = Number.isFinite(Number(deck?.deckNumber)) && Number(deck.deckNumber) > 0
+        ? Math.trunc(Number(deck.deckNumber))
+        : deckIndex + 1;
+      const deckName = String(deck?.deckName || deck?.name || "").trim() || (deckNumber === 1 ? "Lower Deck" : `Deck ${deckNumber}`);
+
+      (Array.isArray(deck?.seats) ? deck.seats : []).forEach((seat) => {
+        const seatLabel = normalizeSeatLabel(seat?.seatLabel ?? seat?.seatNumber);
+        if (!seatLabel || map.has(seatLabel)) return;
+
+        const price = Number(seat?.price);
+        map.set(seatLabel, {
+          seatLabel,
+          seatNumber: String(seat?.seatNumber || seatLabel).trim() || seatLabel,
+          seatType: normalizeSeatType(seat?.seatType),
+          deckName,
+          price: Number.isFinite(price) ? price : undefined,
+        });
+      });
+    });
+
+    return map;
+  }, [seatLayout]);
+
+  const selectedSeatDetails = useMemo(() => {
+    return selectedSeats.map((seatLabel) => {
+      const normalizedLabel = normalizeSeatLabel(seatLabel);
+      const meta = seatMetaByLabel.get(normalizedLabel);
+      const mappedPrice = Number(seatPriceMap?.[normalizedLabel]);
+      const resolvedPrice = Number.isFinite(meta?.price)
+        ? Number(meta.price)
+        : Number.isFinite(mappedPrice)
+          ? mappedPrice
+          : 0;
+
+      return {
+        seatLabel: normalizedLabel,
+        seatNumber: meta?.seatNumber || normalizedLabel,
+        seatType: meta?.seatType || "SEATER",
+        deckName: meta?.deckName || "Deck",
+        price: resolvedPrice,
+      };
+    });
+  }, [seatMetaByLabel, seatPriceMap, selectedSeats]);
+
+  const totalPrice = useMemo(
+    () => selectedSeatDetails.reduce((sum, seat) => sum + (Number.isFinite(seat.price) ? seat.price : 0), 0),
+    [selectedSeatDetails]
+  );
+
+  const averagePrice = selectedSeatDetails.length > 0 ? Number((totalPrice / selectedSeatDetails.length).toFixed(2)) : 0;
+
+  const selectedSeatLockParity = useMemo(() => {
+    const selected = normalizeSeatLabels(selectedSeats);
+    if (selected.length === 0) return true;
+
+    const lockedSet = new Set(normalizeSeatLabels(lockedSeatLabels));
+    return selected.every((seatLabel) => lockedSet.has(seatLabel));
+  }, [selectedSeats, lockedSeatLabels]);
+
+  const continueActionLabel = seatSyncing
+    ? "Syncing seats..."
+    : selectedSeatLockParity
+      ? "Continue"
+      : "Lock seats to continue";
+
+  const myLockedSeatEntries = useMemo(() => {
+    const locks = Array.isArray(seatStatus?.lockedSeats) ? seatStatus.lockedSeats : [];
+
+    return locks
+      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy) === String(currentUser?.id || ""))
+      .map((lock) => {
+        const seatLabel = normalizeSeatLabel(lock?.seatLabel ?? lock?.seatNumber);
+        const lockedAtMs = new Date(lock?.lockedAt || 0).getTime();
+        return {
+          seatLabel,
+          lockedAtMs,
+        };
+      })
+      .filter((lock) => lock.seatLabel && Number.isFinite(lock.lockedAtMs));
+  }, [seatStatus?.lockedSeats, currentUser?.id]);
+
+  const holdExpiresAtMs = useMemo(() => {
+    if (!myLockedSeatEntries.length) return NaN;
+    const earliestLockedAt = Math.min(...myLockedSeatEntries.map((lock) => lock.lockedAtMs));
+    return earliestLockedAt + LOCK_TTL_MS;
+  }, [myLockedSeatEntries]);
+
+  const holdRemainingMs = Number.isFinite(holdExpiresAtMs)
+    ? Math.max(0, holdExpiresAtMs - holdNowMs)
+    : 0;
+
+  const hasActiveHold = selectedSeats.length > 0 && Number.isFinite(holdExpiresAtMs) && holdRemainingMs > 0;
+  const holdTimerText = formatHoldCountdown(holdRemainingMs);
+
+  useEffect(() => {
+    if (!selectedSeats.length || !Number.isFinite(holdExpiresAtMs) || holdRemainingMs > 0) {
+      holdExpiryNotifiedRef.current = false;
+      return;
+    }
+
+    if (holdExpiryNotifiedRef.current) return;
+    holdExpiryNotifiedRef.current = true;
+
+    showToast("error", "Seat hold expired. Please reselect seats to continue booking.");
+    void refresh({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdExpiresAtMs, holdRemainingMs, selectedSeats.length]);
+
+  const passengerManifest = useMemo(() => {
+    return selectedSeats.map((seatLabel, index) => {
+      const passenger = seatPassengers?.[seatLabel] || {};
+      const gender = normalizeGender(passenger.gender) || "other";
+      const ageRaw = Number(passenger.age);
+      const age = Number.isFinite(ageRaw) && ageRaw >= 1 && ageRaw <= 120 ? Math.trunc(ageRaw) : 30;
+
+      return {
+        seatLabel,
+        name: String(passenger.name || (index === 0 ? contactName : "")).trim(),
+        phone: String(passenger.phone || contactPhone).trim(),
+        gender,
+        age,
+        idNumber: String(passenger.idNumber || "").trim(),
+      };
+    });
+  }, [contactName, contactPhone, seatPassengers, selectedSeats]);
+
+  const busImage = schedule?.bus?.imageUrl ? toAbsoluteAssetUrl(schedule.bus.imageUrl) : "";
+
+  const hasUpperDeck = useMemo(() => {
+    return seatLayout.some((deck, index) => {
+      const deckNumber = Number.isFinite(Number(deck?.deckNumber)) ? Number(deck.deckNumber) : index + 1;
+      const name = String(deck?.deckName || deck?.name || "").toLowerCase();
+      return deckNumber > 1 || name.includes("upper");
+    });
+  }, [seatLayout]);
+
+  const galleryImages = useMemo(() => {
+    const exterior = busImage || createPlaceholderImage({
+      title: "Bus Exterior",
+      subtitle: "SmartBus departure view",
+      gradientStart: "#fb923c",
+      gradientEnd: "#f97316",
+    });
+
+    const interior = createPlaceholderImage({
+      title: "Seat Interior",
+      subtitle: "Aisle and seat comfort view",
+      gradientStart: "#14b8a6",
+      gradientEnd: "#0ea5e9",
+    });
+
+    const sleeper = createPlaceholderImage({
+      title: hasUpperDeck ? "Upper Deck Sleeper" : "Passenger Cabin",
+      subtitle: hasUpperDeck ? "Sleeper deck perspective" : "Cabin perspective",
+      gradientStart: "#a78bfa",
+      gradientEnd: "#7c3aed",
+    });
+
+    return [
+      {
+        src: exterior,
+        label: "Exterior bus image",
+        description: "Main profile of your selected bus",
+      },
+      {
+        src: interior,
+        label: "Seat interior layout",
+        description: "Interior seat arrangement overview",
+      },
+      {
+        src: sleeper,
+        label: hasUpperDeck ? "Sleeper upper deck view" : "Passenger cabin view",
+        description: hasUpperDeck ? "Dedicated sleeper deck perspective" : "Cabin arrangement and comfort zone",
+      },
+    ];
+  }, [busImage, hasUpperDeck]);
+
+  const onProceed = async () => {
+    if (!activeScheduleId) {
+      showToast("error", "Invalid schedule selected");
+      return;
+    }
+
+    if (seatSyncing) {
+      showToast("error", "Seat changes are still syncing. Please wait a moment.");
+      return;
+    }
+
+    if (selectedSeats.length === 0) {
+      showToast("error", "Select at least one seat");
+      return;
+    }
+
+    if (!selectedBoarding?.name) {
+      showToast("error", "Select a boarding point");
+      return;
+    }
+
+    if (!selectedDropping?.name) {
+      showToast("error", "Select a dropping point");
+      return;
+    }
+
+    if (selectedDropping.idx <= selectedBoarding.idx) {
+      showToast("error", "Dropping point must be after boarding point");
+      return;
+    }
+
+    const boardingMs = parseIsoDateTimeMs(selectedBoarding.date, selectedBoarding.time);
+    const droppingMs = parseIsoDateTimeMs(selectedDropping.date, selectedDropping.time);
+
+    if (!Number.isFinite(boardingMs) || !Number.isFinite(droppingMs) || droppingMs <= boardingMs) {
+      showToast("error", "Invalid boarding and dropping schedule times");
+      return;
+    }
+
+    const contactValidation = validateContact({ name: contactName, phone: contactPhone });
+    if (!contactValidation.ok) {
+      showToast("error", contactValidation.message);
+      return;
+    }
+
+    if (!currentUser?.id) {
+      redirectToLogin(selectedSeats);
+      return;
+    }
+
+    const primaryPassenger = passengerManifest[0] || {};
+    const passengerName = String(primaryPassenger.name || contactName).trim();
+    const passengerPhone = String(primaryPassenger.phone || contactPhone).trim();
+    const passengerGender = normalizeGender(primaryPassenger.gender) || "other";
+    const ageRaw = Number(primaryPassenger.age);
+    const passengerAge = Number.isFinite(ageRaw) && ageRaw >= 1 && ageRaw <= 120 ? Math.trunc(ageRaw) : 30;
+
+    if (!passengerName) {
+      showToast("error", "Passenger name is required for at least one selected seat");
+      return;
+    }
+
+    if (String(passengerPhone).replace(/\D/g, "").length < 7) {
+      showToast("error", "Passenger phone is invalid");
+      return;
+    }
+
+    setActionLoading(true);
+    isRedirectingToPaymentRef.current = false;
+
+    try {
+      const lockCheck = await ensureSelectedSeatsLocked();
+      if (!lockCheck.ok) {
+        showToast("error", lockCheck.message || "Failed to secure seat lock for payment");
+        return;
+      }
+
+      const seatsForPayment = normalizeSeatLabels(lockCheck.lockedSeats || selectedSeatsRef.current);
+      if (seatsForPayment.length === 0) {
+        showToast("error", "Seat lock required before payment");
+        return;
+      }
+
+      const selectedSnapshot = normalizeSeatLabels(selectedSeatsRef.current);
+      const paymentSeatSet = new Set(seatsForPayment);
+      const lockMismatch = selectedSnapshot.length !== seatsForPayment.length
+        || selectedSnapshot.some((seatLabel) => !paymentSeatSet.has(seatLabel));
+      if (lockMismatch) {
+        showToast("error", "Seat lock required before payment");
+        return;
+      }
+
+      const passengersPayload = passengerManifest.map((item, index) => {
+        const ageCandidate = Number(item?.age);
+        const normalizedAge = Number.isFinite(ageCandidate) && ageCandidate >= 1 && ageCandidate <= 120
+          ? Math.trunc(ageCandidate)
+          : passengerAge;
+
+        const fallbackName = index === 0 ? passengerName : `Passenger ${index + 1}`;
+        const normalizedName = String(item?.name || fallbackName).trim() || fallbackName;
+        const normalizedPhone = String(item?.phone || passengerPhone).trim() || passengerPhone;
+        const normalizedGender = normalizeGender(item?.gender) || passengerGender;
+        const normalizedSeat = String(item?.seatLabel || seatsForPayment[index] || "").trim().toUpperCase();
+        const idNumber = String(item?.idNumber || "").trim();
+
+        return {
+          seatLabel: normalizedSeat,
+          name: normalizedName,
+          phone: normalizedPhone,
+          gender: normalizedGender,
+          age: normalizedAge,
+          ...(idNumber ? { idNumber } : {}),
+        };
+      });
+
+      const paymentPayload = {
+        scheduleId: activeScheduleId,
+        seats: seatsForPayment,
+        passenger: {
+          name: passengerName,
+          age: passengerAge,
+          gender: passengerGender,
+          phone: passengerPhone,
+        },
+        passengers: passengersPayload,
+        boardingPoint: selectedBoarding.name,
+        droppingPoint: selectedDropping.name,
+      };
+
+      let payment;
+
+      try {
+        payment = await initiateEsewaPayment(paymentPayload);
+      } catch (error) {
+        const message = error?.response?.data?.message || error?.message || "Booking failed";
+        if (!String(message).toLowerCase().includes("seat lock required")) {
+          throw error;
+        }
+
+        const retryLockCheck = await ensureSelectedSeatsLocked();
+        if (!retryLockCheck.ok) {
+          showToast("error", retryLockCheck.message || message);
+          return;
+        }
+
+        payment = await initiateEsewaPayment(paymentPayload);
+      }
+
+      isRedirectingToPaymentRef.current = true;
+      showToast("success", "Redirecting to payment gateway...");
+      submitEsewaForm(payment.formUrl, payment.fields);
+    } catch (error) {
+      isRedirectingToPaymentRef.current = false;
+
+      if (error?.response?.status === 401) {
+        redirectToLogin(selectedSeats);
+        return;
+      }
+
+      const message = error?.response?.data?.message || error?.message || "Booking failed";
+      showToast("error", message);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleBackToSearch = async () => {
+    await releaseSelectedSeats({ silent: true });
+    navigate("/search");
+  };
+
+  const handleCancelHold = async () => {
+    if (!selectedSeatsRef.current.length) {
+      showToast("error", "No selected seats to cancel");
+      return;
+    }
+
+    setActionLoading(true);
+    try {
+      await releaseSelectedSeats({ silent: false });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    };
+  }, []);
+
+  if (!activeScheduleId) {
+    return (
+      <div className="min-h-screen bg-slate-100 px-4 py-10">
+        <div className="mx-auto max-w-lg rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-700">
+          Invalid seat selection URL.
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-100 px-4 py-10">
+        <div className="mx-auto max-w-7xl space-y-4">
+          <div className="skeleton h-12 w-2/3" />
+          <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_340px]">
+            <div className="skeleton h-130 w-full" />
+            <div className="skeleton h-130 w-full" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError && !seatStatus) {
+    return (
+      <div className="min-h-screen bg-slate-100 px-4 py-10">
+        <div className="mx-auto max-w-lg rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-700">
+          <p className="font-semibold">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => refresh()}
+            className="mt-3 inline-flex items-center rounded-lg bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-100 pb-28 md:pb-6">
+      {toast ? (
+        <div
+          key={toast.id}
+          className={`fixed right-4 top-4 z-50 max-w-[92vw] rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-lg ${
+            toast.kind === "success" ? "bg-emerald-600" : "bg-rose-600"
+          }`}
+        >
+          {toast.text}
+        </div>
+      ) : null}
+
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={handleBackToSearch}
+            disabled={actionLoading || seatSyncing}
+            className="inline-flex items-center text-sm font-semibold text-slate-600 transition hover:text-slate-900 disabled:opacity-60"
+          >
+            ← Back to Search
+          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleCancelHold}
+              disabled={actionLoading || seatSyncing || selectedSeats.length === 0}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-60"
+            >
+              Cancel Hold
+            </button>
+
+            <button
+              type="button"
+              onClick={() => refresh({ silent: true })}
+              disabled={actionLoading || seatSyncing}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-60"
+            >
+              <RefreshCw className="h-3.5 w-3.5" /> Refresh Seats
+            </button>
+          </div>
+        </div>
+
+        <header className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+          <h1 className="text-xl font-extrabold text-slate-900 sm:text-2xl">{schedule?.bus?.name || "Seat Selection"}</h1>
+          <p className="mt-1 text-sm text-slate-600">
+            {schedule?.route?.source || "Source"} to {schedule?.route?.destination || "Destination"}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {schedule?.date || ""} {schedule?.time ? `at ${schedule.time}` : ""}
+          </p>
+        </header>
+
+        <div className="mt-5 grid gap-5 md:grid-cols-[minmax(0,1fr)_340px] xl:grid-cols-[minmax(0,1fr)_380px]">
+          <section className="space-y-4">
+            <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Choose Your Seats</h2>
+                  <p className="text-xs text-slate-500">Real-time seat availability with deck-aware selection. Seat hold is valid for 10 minutes.</p>
+                </div>
+                <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                  {selectedSeats.length} selected
+                </span>
+                {seatSyncing ? (
+                  <span className="rounded-lg bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">
+                    Syncing...
+                  </span>
+                ) : null}
+                {selectedSeats.length > 0 ? (
+                  <span className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${hasActiveHold ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
+                    Hold: {hasActiveHold ? holdTimerText : "syncing"}
+                  </span>
+                ) : null}
+              </div>
+
+              <SeatDeckMap
+                totalSeats={seatStatus?.totalSeats || 0}
+                seatLayout={seatStatus?.seatLayout || []}
+                bookedSeats={seatStatus?.bookedSeats || []}
+                lockedSeats={seatStatus?.lockedSeats || []}
+                selectedSeats={selectedSeats}
+                myUserId={currentUser?.id}
+                onToggleSeat={toggleSeat}
+              />
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Bus Image Gallery</h2>
+                  <p className="text-xs text-slate-500">Tap any image to open full-screen preview.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 sm:gap-3">
+                {galleryImages.map((image, index) => (
+                  <button
+                    key={`gallery-preview-${image.label}`}
+                    type="button"
+                    onClick={() => {
+                      setGalleryStartIndex(index);
+                      setGalleryOpen(true);
+                    }}
+                    className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-100 shadow-sm"
+                  >
+                    <img
+                      src={image.src}
+                      alt={image.label}
+                      className="h-24 w-full object-cover transition duration-300 group-hover:scale-105 sm:h-28"
+                    />
+                    <div className="border-t border-slate-200 bg-white px-2 py-1 text-left text-[11px] font-semibold text-slate-600">
+                      {image.label}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </section>
+
+          <aside className="space-y-4">
+            <div className="hidden md:block">
+              <BookingSummaryPanel
+                selectedSeatDetails={selectedSeatDetails}
+                averagePrice={averagePrice}
+                totalPrice={totalPrice}
+                actionLoading={actionLoading || seatSyncing}
+                actionLabel={continueActionLabel}
+                onContinue={onProceed}
+                showDesktopAction
+              />
+            </div>
+
+            <PassengerDetailsPanel
+              selectedSeats={selectedSeats}
+              seatPassengers={seatPassengers}
+              contactName={contactName}
+              contactPhone={contactPhone}
+              onContactChange={handleContactChange}
+              onSeatPassengerChange={handleSeatPassengerChange}
+              boardingOptions={boardingOptions}
+              droppingOptions={validDroppingOptions}
+              boardingPoint={boardingPoint}
+              droppingPoint={droppingPoint}
+              onBoardingPointChange={setBoardingPoint}
+              onDroppingPointChange={setDroppingPoint}
+            />
+
+            <div className="md:hidden">
+              <BookingSummaryPanel
+                selectedSeatDetails={selectedSeatDetails}
+                averagePrice={averagePrice}
+                totalPrice={totalPrice}
+                actionLoading={actionLoading || seatSyncing}
+                actionLabel={continueActionLabel}
+                onContinue={onProceed}
+                showDesktopAction={false}
+              />
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.08)] backdrop-blur md:hidden">
+        <div className="mx-auto max-w-7xl">
+          <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+            <div className="min-w-0">
+              <p className="font-semibold text-slate-500">Seats Selected</p>
+              <p className="truncate font-bold text-slate-900">
+                {selectedSeatDetails.length ? selectedSeatDetails.map((seat) => seat.seatNumber).join(", ") : "None"}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="font-semibold text-slate-500">Total</p>
+              <p className="text-base font-extrabold text-[rgb(var(--seat-primary))]">{formatCurrency(totalPrice)}</p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={selectedSeatDetails.length === 0 || actionLoading || seatSyncing}
+            onClick={onProceed}
+            className="inline-flex h-11 w-full items-center justify-center rounded-xl bg-[rgb(var(--seat-primary))] px-4 text-sm font-bold text-white transition hover:bg-[rgb(var(--seat-primary-strong))] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {actionLoading ? "Processing..." : continueActionLabel}
+          </button>
+        </div>
+      </div>
+
+      <BusImageGalleryModal
+        open={galleryOpen}
+        images={galleryImages}
+        startIndex={galleryStartIndex}
+        onClose={() => setGalleryOpen(false)}
+      />
+    </div>
+  );
 }
