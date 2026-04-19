@@ -12,9 +12,9 @@ import {
 } from "lucide-react";
 import BusModal from "../../components/admin/BusModal";
 import ConfirmDialog from "../../components/admin/ConfirmDialog";
-import { createBus, deleteBus, getBuses, updateBus } from "../../services/admin.service";
+import { createBus, deleteBus, getAllUsers, getBuses, updateBus } from "../../services/admin.service";
 import { BUS_TYPE_OPTIONS, getBusTypeLabels, getBusTypesFromBus, isSleeperBusType } from "../../utils/busTypeUtils";
-import { toAbsoluteAssetUrl } from "../../utils/helpers";
+import { getBusImageUrl } from "../../utils/helpers";
 
 const PAGE_SIZE = 6;
 
@@ -64,6 +64,7 @@ export default function ManageBuses() {
 	const [busModalOpen, setBusModalOpen] = useState(false);
 	const [modalMode, setModalMode] = useState("create");
 	const [modalBus, setModalBus] = useState(null);
+	const [operators, setOperators] = useState([]);
 	const [submitting, setSubmitting] = useState(false);
 
 	const [deletingBus, setDeletingBus] = useState(null);
@@ -93,6 +94,36 @@ export default function ManageBuses() {
 	useEffect(() => {
 		loadBuses();
 	}, [loadBuses]);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		const loadOperators = async () => {
+			try {
+				const users = await getAllUsers();
+				if (cancelled) return;
+
+				const operatorRows = (Array.isArray(users) ? users : [])
+					.filter((user) => String(user?.role || "").toLowerCase() === "operator" && user?.isActive !== false)
+					.map((user) => ({
+						_id: user?._id,
+						email: String(user?.email || "").trim().toLowerCase(),
+						name: String(user?.name || "").trim(),
+					}))
+					.filter((operator) => Boolean(operator.email))
+					.sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+
+				setOperators(operatorRows);
+			} catch {
+				if (!cancelled) setOperators([]);
+			}
+		};
+
+		void loadOperators();
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	useEffect(() => {
 		const timer = setTimeout(() => {
@@ -179,7 +210,12 @@ export default function ManageBuses() {
 			...bus,
 			name: `${String(bus?.name || "Bus").trim()} Copy`,
 			vehicleNumber: "",
-			operator: typeof bus?.operator === "object" ? bus?.operator?._id || "" : bus?.operator || "",
+			operator:
+				typeof bus?.operator === "object"
+					? String(bus?.operator?.email || "").trim().toLowerCase()
+					: String(bus?.operator || "").includes("@")
+						? String(bus?.operator || "").trim().toLowerCase()
+						: "",
 		});
 		setBusModalOpen(true);
 	};
@@ -367,12 +403,13 @@ export default function ManageBuses() {
 							const status = getStatus(bus);
 							const busTypes = getBusTypesFromBus(bus);
 							const typeLabels = getBusTypeLabels(bus);
+							const busImage = getBusImageUrl(bus, "bus");
 							return (
 								<article key={bus._id} className="admin-surface overflow-hidden">
 									<div className="aspect-video w-full bg-slate-100 dark:bg-slate-800">
-										{bus.imageUrl ? (
+										{busImage ? (
 											<img
-												src={toAbsoluteAssetUrl(bus.imageUrl)}
+												src={busImage}
 												alt={bus.name}
 												className="h-full w-full object-cover"
 											/>
@@ -482,6 +519,7 @@ export default function ManageBuses() {
 				open={busModalOpen}
 				mode={modalMode}
 				bus={modalBus}
+				operators={operators}
 				submitting={submitting}
 				onClose={() => {
 					if (submitting) return;

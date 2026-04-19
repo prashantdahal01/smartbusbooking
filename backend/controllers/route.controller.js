@@ -6,6 +6,7 @@ const Stop = require("../models/Stop");
 const Schedule = require("../models/Schedule");
 const Booking = require("../models/Booking");
 const { normalizeRoutePointList, getRoutePointLanes } = require("../utils/routePoints");
+const { syncRoutePoints } = require("../services/routePointSync.service");
 
 const populateRoute = {
 	path: "sourceCity destinationCity",
@@ -257,6 +258,24 @@ exports.createRoute = async (req, res) => {
 		if (e?.code === 11000) {
 			return res.status(409).json({ message: "Route already exists between selected cities" });
 		}
+		return res.status(500).json({ message: e.message });
+	}
+};
+
+exports.syncRoutePointLanes = async (req, res) => {
+	try {
+		const routeId = req.params?.id;
+		if (!mongoose.isValidObjectId(routeId)) {
+			return res.status(400).json({ message: "Invalid route id" });
+		}
+
+		const updated = await syncRoutePoints(routeId);
+		if (!updated) {
+			return res.status(404).json({ message: "Route not found" });
+		}
+
+		return res.json(withRoutePointCompatibility(updated));
+	} catch (e) {
 		return res.status(500).json({ message: e.message });
 	}
 };

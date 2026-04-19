@@ -27,15 +27,27 @@ const deckSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const busImagesSchema = new mongoose.Schema(
+  {
+    bus: { type: String, trim: true },
+    seatLayout: { type: String, trim: true },
+    sleeperLayout: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 const busSchema = new mongoose.Schema({
   name: String,
   type: String,
+  isActive: { type: Boolean, default: true },
   busCategory: { type: String, enum: BUS_CATEGORIES, default: "AC_SEATER" },
   busTypes: { type: [String], enum: BUS_TYPES, default: ["SINGLE_SEATER"] },
   vehicleNumber: String,
   phone: String,
   totalSeats: Number,
   decks: { type: [deckSchema], default: [] },
+  images: { type: busImagesSchema, default: () => ({}) },
+  // Legacy single-image field retained for backward compatibility.
   imageUrl: String,
   policies: {
     refundPolicy: { type: String, default: "" },
@@ -77,6 +89,10 @@ const legacyTypeToBusTypes = {
 
 const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
 const normalizeBusType = (value) => String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+const normalizeOptionalImagePath = (value) => {
+  const text = String(value || "").trim();
+  return text || "";
+};
 
 const normalizeBusTypesList = (rawTypes) => {
   const seen = new Set();
@@ -100,6 +116,21 @@ const deriveCategoryFromBusTypes = (busTypes) => {
 };
 
 busSchema.pre("validate", function normalizeBusData(next) {
+  const existingImages = this.images && typeof this.images === "object" ? this.images : {};
+  const normalizedImages = {
+    bus: normalizeOptionalImagePath(existingImages.bus),
+    seatLayout: normalizeOptionalImagePath(existingImages.seatLayout),
+    sleeperLayout: normalizeOptionalImagePath(existingImages.sleeperLayout),
+  };
+
+  const legacyImageUrl = normalizeOptionalImagePath(this.imageUrl);
+  if (!normalizedImages.bus && legacyImageUrl) {
+    normalizedImages.bus = legacyImageUrl;
+  }
+
+  this.images = normalizedImages;
+  this.imageUrl = normalizedImages.bus || undefined;
+
   const rawBusTypes = normalizeBusTypesList(this.busTypes);
 
   if (rawBusTypes.length > 0) {

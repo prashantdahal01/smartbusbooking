@@ -5,11 +5,65 @@ import { BusFront, CalendarDays, Clock3, MapPin, Ticket } from "lucide-react";
 import { useMemo } from "react";
 import { formatCurrency } from "../utils/helpers";
 
-const statusClasses = {
-  confirmed: "border-emerald-200 bg-emerald-50 text-emerald-700",
-  cancelled: "border-rose-200 bg-rose-50 text-rose-700",
-  payment_pending: "border-amber-200 bg-amber-50 text-amber-700",
-  payment_failed: "border-slate-300 bg-slate-100 text-slate-700",
+const statusClassByKey = {
+	confirmed: "border-emerald-200 bg-emerald-50 text-emerald-700",
+	cancelled: "border-rose-200 bg-rose-50 text-rose-700",
+	payment_pending: "border-amber-200 bg-amber-50 text-amber-700",
+	payment_failed: "border-slate-300 bg-slate-100 text-slate-700",
+};
+
+const normalizePaymentStatus = (value) => {
+	const normalized = String(value || "").trim().toLowerCase();
+	if (normalized === "paid") return "paid";
+	if (normalized === "failed") return "failed";
+	return "pending";
+};
+
+const normalizeBookingState = (booking) => {
+	const rawBookingStatus = String(booking?.status || "").trim().toLowerCase();
+	const paymentStatus = normalizePaymentStatus(booking?.paymentStatus || booking?.payment?.status);
+
+	if (rawBookingStatus === "cancelled") {
+		return {
+			bookingStatus: "cancelled",
+			paymentStatus,
+			label: "Cancelled",
+			classKey: "cancelled",
+		};
+	}
+
+	if (rawBookingStatus === "confirmed") {
+		return {
+			bookingStatus: "confirmed",
+			paymentStatus: "paid",
+			label: "Confirmed",
+			classKey: "confirmed",
+		};
+	}
+
+	if (paymentStatus === "failed" || rawBookingStatus === "payment_failed") {
+		return {
+			bookingStatus: "pending",
+			paymentStatus: "failed",
+			label: "Payment Failed",
+			classKey: "payment_failed",
+		};
+	}
+
+	return {
+		bookingStatus: "pending",
+		paymentStatus: "pending",
+		label: "Payment Pending",
+		classKey: "payment_pending",
+	};
+};
+
+const formatCountdown = (ms) => {
+	const safeMs = Math.max(0, Number(ms) || 0);
+	const totalSeconds = Math.floor(safeMs / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 };
 
 const formatDateLabel = (rawDate) => {
@@ -25,10 +79,11 @@ const formatDateLabel = (rawDate) => {
   });
 };
 
-export default function BookingCard({ booking }) {
+export default function BookingCard({ booking, nowMs = Date.now(), onRetryPayment, retrying = false }) {
 	if (!booking) return null;
 	const route = booking.schedule?.route;
 	const bus = booking.schedule?.bus;
+	const state = normalizeBookingState(booking);
 
 	const seatLabels = Array.isArray(booking?.seats) ? booking.seats : [];
 	const seatCount = seatLabels.length;
@@ -55,12 +110,23 @@ export default function BookingCard({ booking }) {
 		}
 	};
 
-	const statusText = String(booking?.status || "unknown").replace(/_/g, " ");
-	const statusClass = statusClasses[booking?.status] || "border-slate-300 bg-slate-100 text-slate-700";
+	const onRetryClick = () => {
+		if (typeof onRetryPayment !== "function") return;
+		onRetryPayment(booking?._id);
+	};
+
+	const statusClass = statusClassByKey[state.classKey] || "border-slate-300 bg-slate-100 text-slate-700";
 	const dateLabel = formatDateLabel(booking?.schedule?.date);
 	const timeLabel = String(booking?.schedule?.time || "Time N/A").trim() || "Time N/A";
 	const boardingName = String(booking?.boardingPoint?.name || "N/A").trim() || "N/A";
 	const droppingName = String(booking?.droppingPoint?.name || "N/A").trim() || "N/A";
+
+	const lockExpiresAtMs = new Date(booking?.lockExpiresAt || 0).getTime();
+	const hasActiveLock = Number.isFinite(lockExpiresAtMs) && lockExpiresAtMs > nowMs;
+	const lockRemainingMs = hasActiveLock ? lockExpiresAtMs - nowMs : 0;
+	const showPendingTimer = state.bookingStatus === "pending";
+	const canRetryPayment = Boolean(booking?.retryEligible) && hasActiveLock && state.bookingStatus === "pending";
+	const paymentButtonLabel = retrying ? "Redirecting..." : "Pay Now";
 
 	return (
 		<motion.article
@@ -78,8 +144,19 @@ export default function BookingCard({ booking }) {
 							{route?.source || "Source"} -&gt; {route?.destination || "Destination"}
 						</p>
 						<span className={`rounded-full border px-2.5 py-1 text-xs font-semibold capitalize ${statusClass}`}>
-							{statusText}
+							{state.label}
 						</span>
+						{showPendingTimer ? (
+							<span
+								className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${
+									hasActiveLock
+										? "border-amber-200 bg-amber-50 text-amber-700"
+										: "border-rose-200 bg-rose-50 text-rose-700"
+								}`}
+							>
+								{hasActiveLock ? `Hold ${formatCountdown(lockRemainingMs)}` : "Hold expired"}
+							</span>
+						) : null}
 					</div>
 
 					<div className="grid gap-2 text-sm text-slate-600 sm:grid-cols-2">
@@ -125,14 +202,27 @@ export default function BookingCard({ booking }) {
 
 				<div className="flex min-w-48 flex-row items-end justify-between gap-3 sm:flex-col sm:items-end">
 					<div className="text-right">
-						<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Paid</p>
+						<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Fare</p>
 						<p className="bg-linear-to-r from-violet-600 to-purple-700 bg-clip-text text-2xl font-extrabold text-transparent">
 							{formatCurrency(totalPrice)}
 						</p>
 					</div>
 
 					<div className="flex flex-wrap justify-end gap-2">
-						{booking?.status === "confirmed" ? (
+						{canRetryPayment ? (
+							<motion.button
+								type="button"
+								onClick={onRetryClick}
+								disabled={retrying}
+								whileHover={{ y: -1, scale: 1.01 }}
+								whileTap={{ scale: 0.98 }}
+								className="rounded-lg bg-linear-to-r from-amber-500 to-orange-600 px-3 py-2 text-xs font-semibold text-white shadow-[0_10px_24px_rgba(249,115,22,0.3)] transition hover:from-amber-600 hover:to-orange-700 disabled:opacity-65"
+							>
+								{paymentButtonLabel}
+							</motion.button>
+						) : null}
+
+						{state.bookingStatus === "confirmed" ? (
 							<motion.button
 								type="button"
 								onClick={onOpenTicketInNewTab}

@@ -10,6 +10,7 @@ import {
 	getDistricts,
 	getRouteStops,
 	getRoutes,
+	syncRoutePoints,
 	updateRoute,
 } from "../../services/admin.service";
 
@@ -188,8 +189,26 @@ export default function ManageRoutes() {
 
 		setStopsLoading(true);
 		try {
-			const data = await getRouteStops(routeId);
-			setOperationalStops(Array.isArray(data) ? data : []);
+			const [stopsResult, syncResult] = await Promise.allSettled([
+				getRouteStops(routeId),
+				syncRoutePoints(routeId),
+			]);
+
+			if (stopsResult.status === "fulfilled") {
+				setOperationalStops(Array.isArray(stopsResult.value) ? stopsResult.value : []);
+			} else {
+				setOperationalStops([]);
+				setError(stopsResult.reason?.response?.data?.message || stopsResult.reason?.message || "Failed to load route stops");
+			}
+
+			if (syncResult.status === "fulfilled") {
+				const syncedRoute = syncResult.value;
+				if (syncedRoute?._id) {
+					setRoutes((prev) => prev.map((route) => (
+						String(route?._id) === String(syncedRoute._id) ? syncedRoute : route
+					)));
+				}
+			}
 		} catch (err) {
 			setOperationalStops([]);
 			setError(err?.response?.data?.message || err?.message || "Failed to load route stops");

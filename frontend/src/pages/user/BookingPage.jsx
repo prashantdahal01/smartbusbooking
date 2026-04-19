@@ -7,7 +7,7 @@ import PassengerDetailsPanel from "../../components/seats/PassengerDetailsPanel"
 import SeatDeckMap from "../../components/seats/SeatDeckMap";
 import { useAuth } from "../../context/AuthContext";
 import { getSeatStatus, initiateEsewaPayment, lockSeats, unlockSeats } from "../../services/booking.service";
-import { formatCurrency, toAbsoluteAssetUrl } from "../../utils/helpers";
+import { formatCurrency, getBusImageUrl } from "../../utils/helpers";
 
 const stopKey = (value) => String(value || "").trim().toLowerCase();
 
@@ -50,7 +50,7 @@ const getMyLockedSeatLabels = (locks, userId) => {
 
   return normalizeSeatLabels(
     (Array.isArray(locks) ? locks : [])
-      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy) === String(userId))
+      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy ?? lock?.userId) === String(userId))
       .map((lock) => lock?.seatLabel ?? lock?.seatNumber)
   );
 };
@@ -120,7 +120,7 @@ const createPlaceholderImage = ({ title, subtitle, gradientStart, gradientEnd })
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 };
 
-const LOCK_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_LOCK_TTL_MS = 10 * 60 * 1000;
 
 const formatHoldCountdown = (ms) => {
   const safeMs = Math.max(0, Number(ms) || 0);
@@ -158,6 +158,7 @@ export default function BookingPage() {
   const pendingSeatOpsRef = useRef(0);
   const isRedirectingToPaymentRef = useRef(false);
   const holdExpiryNotifiedRef = useRef(false);
+  const holdExpiryRecheckInFlightRef = useRef(false);
   const [holdNowMs, setHoldNowMs] = useState(() => Date.now());
 
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -214,7 +215,7 @@ export default function BookingPage() {
     form.submit();
   };
 
-  const refresh = async ({ silent = false, syncSelectionWithLocks = false } = {}) => {
+  const refresh = async ({ silent = false, syncSelectionWithLocks = false, showErrorToast = true } = {}) => {
     if (!activeScheduleId) return null;
 
     if (!silent) {
@@ -237,7 +238,7 @@ export default function BookingPage() {
     } catch (error) {
       const message = error?.response?.data?.message || error?.message || "Failed to load seat status";
       if (!silent) setLoadError(message);
-      else showToast("error", message);
+      else if (showErrorToast) showToast("error", message);
       return null;
     } finally {
       if (!silent) setLoading(false);
@@ -557,6 +558,9 @@ export default function BookingPage() {
     try {
       if (isSelected) await unlockSeats({ scheduleId: activeScheduleId, seats: [normalizedSeatLabel] });
       else await lockSeats({ scheduleId: activeScheduleId, seats: [normalizedSeatLabel] });
+
+      // Sync canonical lock expiry from server to keep hold timer accurate.
+      await refresh({ silent: true, showErrorToast: false });
     } catch (error) {
       const message = error?.response?.data?.message || error?.message || (isSelected ? "Unlock failed" : "Lock failed");
       showToast("error", message);
@@ -757,33 +761,46 @@ export default function BookingPage() {
     return selected.every((seatLabel) => lockedSet.has(seatLabel));
   }, [selectedSeats, lockedSeatLabels]);
 
-  const continueActionLabel = seatSyncing
-    ? "Syncing seats..."
-    : selectedSeatLockParity
-      ? "Continue"
-      : "Lock seats to continue";
+  const seatHoldDurationMs = useMemo(() => {
+    const value = Number(seatStatus?.lockDurationMs);
+    return Number.isFinite(value) && value > 0 ? Math.trunc(value) : DEFAULT_LOCK_TTL_MS;
+  }, [seatStatus?.lockDurationMs]);
 
-  const myLockedSeatEntries = useMemo(() => {
+  const seatHoldDurationMinutes = useMemo(() => {
+    return Math.max(1, Math.round(seatHoldDurationMs / 60000));
+  }, [seatHoldDurationMs]);
+
+  const myLockExpiryBySeat = useMemo(() => {
+    const lockMap = new Map();
     const locks = Array.isArray(seatStatus?.lockedSeats) ? seatStatus.lockedSeats : [];
 
-    return locks
-      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy) === String(currentUser?.id || ""))
-      .map((lock) => {
+    locks
+      .filter((lock) => String(lock?.lockedBy?._id ?? lock?.lockedBy ?? lock?.userId) === String(currentUser?.id || ""))
+      .forEach((lock) => {
         const seatLabel = normalizeSeatLabel(lock?.seatLabel ?? lock?.seatNumber);
-        const lockedAtMs = new Date(lock?.lockedAt || 0).getTime();
-        return {
-          seatLabel,
-          lockedAtMs,
-        };
-      })
-      .filter((lock) => lock.seatLabel && Number.isFinite(lock.lockedAtMs));
+        const expiresAtMs = new Date(lock?.expiresAt || 0).getTime();
+        if (!seatLabel || !Number.isFinite(expiresAtMs)) return;
+
+        const current = lockMap.get(seatLabel);
+        if (!Number.isFinite(current) || expiresAtMs < current) {
+          lockMap.set(seatLabel, expiresAtMs);
+        }
+      });
+
+    return lockMap;
   }, [seatStatus?.lockedSeats, currentUser?.id]);
 
   const holdExpiresAtMs = useMemo(() => {
-    if (!myLockedSeatEntries.length) return NaN;
-    const earliestLockedAt = Math.min(...myLockedSeatEntries.map((lock) => lock.lockedAtMs));
-    return earliestLockedAt + LOCK_TTL_MS;
-  }, [myLockedSeatEntries]);
+    const selected = normalizeSeatLabels(selectedSeats);
+    if (selected.length === 0) return NaN;
+
+    const expiries = selected
+      .map((seatLabel) => Number(myLockExpiryBySeat.get(seatLabel)))
+      .filter((value) => Number.isFinite(value));
+
+    if (expiries.length !== selected.length || expiries.length === 0) return NaN;
+    return Math.min(...expiries);
+  }, [myLockExpiryBySeat, selectedSeats]);
 
   const holdRemainingMs = Number.isFinite(holdExpiresAtMs)
     ? Math.max(0, holdExpiresAtMs - holdNowMs)
@@ -792,19 +809,41 @@ export default function BookingPage() {
   const hasActiveHold = selectedSeats.length > 0 && Number.isFinite(holdExpiresAtMs) && holdRemainingMs > 0;
   const holdTimerText = formatHoldCountdown(holdRemainingMs);
 
+  const continueActionLabel = seatSyncing
+    ? "Syncing seats..."
+    : selectedSeatLockParity && hasActiveHold
+      ? "Continue"
+      : "Lock seats to continue";
+
   useEffect(() => {
-    if (!selectedSeats.length || !Number.isFinite(holdExpiresAtMs) || holdRemainingMs > 0) {
+    if (!selectedSeatLockParity || !selectedSeats.length || !Number.isFinite(holdExpiresAtMs) || holdRemainingMs > 0) {
       holdExpiryNotifiedRef.current = false;
+      holdExpiryRecheckInFlightRef.current = false;
       return;
     }
 
-    if (holdExpiryNotifiedRef.current) return;
-    holdExpiryNotifiedRef.current = true;
+    if (holdExpiryNotifiedRef.current || holdExpiryRecheckInFlightRef.current) return;
+    holdExpiryRecheckInFlightRef.current = true;
 
-    showToast("error", "Seat hold expired. Please reselect seats to continue booking.");
-    void refresh({ silent: true });
+    const verifyExpiry = async () => {
+      const latest = await refresh({ silent: true, showErrorToast: false });
+      const latestLocks = getMyLockedSeatLabels(latest?.lockedSeats, currentUser?.id);
+      const latestLockSet = new Set(latestLocks);
+      const stillLocked = normalizeSeatLabels(selectedSeatsRef.current).every((seatLabel) => latestLockSet.has(seatLabel));
+
+      holdExpiryRecheckInFlightRef.current = false;
+      if (stillLocked) {
+        holdExpiryNotifiedRef.current = false;
+        return;
+      }
+
+      holdExpiryNotifiedRef.current = true;
+      showToast("error", "Seat hold expired. Please reselect seats to continue booking.");
+    };
+
+    void verifyExpiry();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdExpiresAtMs, holdRemainingMs, selectedSeats.length]);
+  }, [holdExpiresAtMs, holdRemainingMs, selectedSeatLockParity, selectedSeats.length, currentUser?.id]);
 
   const passengerManifest = useMemo(() => {
     return selectedSeats.map((seatLabel, index) => {
@@ -824,7 +863,9 @@ export default function BookingPage() {
     });
   }, [contactName, contactPhone, seatPassengers, selectedSeats]);
 
-  const busImage = schedule?.bus?.imageUrl ? toAbsoluteAssetUrl(schedule.bus.imageUrl) : "";
+  const busImage = getBusImageUrl(schedule?.bus, "bus");
+  const seatLayoutImage = getBusImageUrl(schedule?.bus, "seatLayout");
+  const sleeperLayoutImage = getBusImageUrl(schedule?.bus, "sleeperLayout");
 
   const hasUpperDeck = useMemo(() => {
     return seatLayout.some((deck, index) => {
@@ -842,14 +883,14 @@ export default function BookingPage() {
       gradientEnd: "#f97316",
     });
 
-    const interior = createPlaceholderImage({
+    const interior = seatLayoutImage || createPlaceholderImage({
       title: "Seat Interior",
       subtitle: "Aisle and seat comfort view",
       gradientStart: "#14b8a6",
       gradientEnd: "#0ea5e9",
     });
 
-    const sleeper = createPlaceholderImage({
+    const sleeper = sleeperLayoutImage || createPlaceholderImage({
       title: hasUpperDeck ? "Upper Deck Sleeper" : "Passenger Cabin",
       subtitle: hasUpperDeck ? "Sleeper deck perspective" : "Cabin perspective",
       gradientStart: "#a78bfa",
@@ -873,7 +914,7 @@ export default function BookingPage() {
         description: hasUpperDeck ? "Dedicated sleeper deck perspective" : "Cabin arrangement and comfort zone",
       },
     ];
-  }, [busImage, hasUpperDeck]);
+  }, [busImage, hasUpperDeck, seatLayoutImage, sleeperLayoutImage]);
 
   const onProceed = async () => {
     if (!activeScheduleId) {
@@ -1168,7 +1209,7 @@ export default function BookingPage() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <h2 className="text-base font-bold text-slate-900">Choose Your Seats</h2>
-                  <p className="text-xs text-slate-500">Real-time seat availability with deck-aware selection. Seat hold is valid for 10 minutes.</p>
+                  <p className="text-xs text-slate-500">Real-time seat availability with deck-aware selection. Seat hold is valid for {seatHoldDurationMinutes} minutes.</p>
                 </div>
                 <span className="rounded-lg bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
                   {selectedSeats.length} selected
@@ -1180,7 +1221,7 @@ export default function BookingPage() {
                 ) : null}
                 {selectedSeats.length > 0 ? (
                   <span className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${hasActiveHold ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                    Hold: {hasActiveHold ? holdTimerText : "syncing"}
+                    Hold: {hasActiveHold ? holdTimerText : "expired"}
                   </span>
                 ) : null}
               </div>

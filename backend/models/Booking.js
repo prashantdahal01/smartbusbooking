@@ -25,7 +25,7 @@ const passengerDetailSchema = new mongoose.Schema(
 const paymentSchema = new mongoose.Schema(
   {
     provider: { type: String, enum: ["esewa"], default: "esewa" },
-    status: { type: String, enum: ["initiated", "paid", "failed"], default: "initiated" },
+    status: { type: String, enum: ["pending", "paid", "failed", "initiated"], default: "pending" },
     productCode: String,
     totalAmount: Number,
     transactionUuid: String,
@@ -71,7 +71,7 @@ const bookingSchema = new mongoose.Schema(
   seatPriceBreakdown: { type: [seatPriceSchema], default: [] },
   pricePerSeat: Number,
   totalPrice: Number,
-  status: { type: String, enum: ["payment_pending", "confirmed", "cancelled", "payment_failed"], default: "confirmed" },
+  status: { type: String, enum: ["pending", "confirmed", "cancelled", "payment_pending", "payment_failed"], default: "pending" },
   payment: paymentSchema
   },
   { timestamps: true }

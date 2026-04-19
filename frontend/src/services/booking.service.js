@@ -5,6 +5,37 @@ import axiosInstance from "./axios";
 // getMyBookings()             – GET  /api/bookings
 // getBookingById(id)          – GET  /api/bookings/:id
 
+const isValidDateKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+
+const getTodayStartDate = () => {
+	const now = new Date();
+	now.setHours(0, 0, 0, 0);
+	return now;
+};
+
+const toScheduleDate = (schedule) => {
+	const dateKey = String(schedule?.travelDate || schedule?.date || "").trim();
+	if (!isValidDateKey(dateKey)) return null;
+	const parsed = new Date(`${dateKey}T00:00:00`);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed;
+};
+
+const isValidUpcomingSchedule = (schedule, todayStart) => {
+	if (!schedule || typeof schedule !== "object") return false;
+	if (!schedule.bus || schedule.bus?.isActive === false) return false;
+
+	const scheduleDate = toScheduleDate(schedule);
+	if (!scheduleDate) return false;
+
+	return scheduleDate.getTime() >= todayStart.getTime();
+};
+
+const filterValidSchedules = (rows) => {
+	const todayStart = getTodayStartDate();
+	return (Array.isArray(rows) ? rows : []).filter((schedule) => isValidUpcomingSchedule(schedule, todayStart));
+};
+
 export async function searchSchedules({ source, destination, date, includeRoutePlan = false }) {
 	const params = new URLSearchParams();
 	if (source) params.set("source", source);
@@ -12,7 +43,15 @@ export async function searchSchedules({ source, destination, date, includeRouteP
 	if (date) params.set("date", date);
 	if (includeRoutePlan) params.set("includeRoutePlan", "true");
 	const res = await axiosInstance.get(`/schedules/search?${params.toString()}`);
-	return res.data;
+
+	if (includeRoutePlan) {
+		return {
+			...res.data,
+			schedules: filterValidSchedules(res.data?.schedules),
+		};
+	}
+
+	return filterValidSchedules(res.data);
 }
 
 export async function getDistrictRoutePlan({ source, destination }) {
@@ -70,6 +109,11 @@ export async function createBooking({ scheduleId, seats, passenger, passengers, 
 
 export async function initiateEsewaPayment({ scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint }) {
 	const res = await axiosInstance.post("/payments/esewa/initiate", { scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint });
+	return res.data;
+}
+
+export async function retryEsewaPayment({ bookingId }) {
+	const res = await axiosInstance.post("/payments/esewa/retry", { bookingId });
 	return res.data;
 }
 

@@ -4,7 +4,7 @@ let indexHealthPromise = null;
 
 const DEFAULT_LOCK_DURATION_MS = (() => {
   const raw = Number(process.env.SEAT_LOCK_TTL_MS);
-  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 5 * 60 * 1000;
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 10 * 60 * 1000;
 })();
 
 const normalizeSeatNumber = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");

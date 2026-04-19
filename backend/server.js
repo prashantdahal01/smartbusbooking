@@ -3,6 +3,7 @@ require("dotenv").config({ path: path.join(__dirname, ".env") });
 
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
 const connectDB = require("./config/db");
 
 const app = express();
@@ -34,6 +35,17 @@ app.use("/api/admin", require("./routes/admin.routes"));
 
 // Basic error handler
 app.use((err, req, res, next) => {
+	if (err instanceof multer.MulterError) {
+		if (err.code === "LIMIT_FILE_SIZE") {
+			return res.status(400).json({ message: "Image size must be 5MB or less" });
+		}
+		return res.status(400).json({ message: err.message || "Invalid upload request" });
+	}
+
+	if (typeof err?.message === "string" && /upload|image/i.test(err.message)) {
+		return res.status(400).json({ message: err.message });
+	}
+
 	// eslint-disable-next-line no-console
 	console.error(err);
 	res.status(500).json({ message: "Internal server error" });

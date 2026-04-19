@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { verifyToken } = require("../middleware/auth.middleware");
 const { authorizeRoles } = require("../middleware/role.middleware");
-const { uploadBusImage } = require("../middleware/upload.middleware");
+const { uploadBusImages, busImageUploadFields } = require("../middleware/upload.middleware");
 
 const admin = require("../controllers/admin.controller");
 
@@ -23,9 +23,9 @@ router.get("/bookings", admin.getAdminBookings);
 router.patch("/bookings/:id/cancel", admin.cancelBookingByAdmin);
 
 // Bus
-router.post("/bus", uploadBusImage.single("image"), admin.createBus);
+router.post("/bus", uploadBusImages.fields(busImageUploadFields), admin.createBus);
 router.get("/bus", admin.getBuses);
-router.put("/bus/:id", uploadBusImage.single("image"), admin.updateBus);
+router.put("/bus/:id", uploadBusImages.fields(busImageUploadFields), admin.updateBus);
 router.delete("/bus/:id", admin.deleteBus);
 
 // Route

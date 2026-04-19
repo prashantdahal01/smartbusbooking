@@ -142,6 +142,15 @@ const parseObjectId = (value) => {
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
 
+const getTodayDateKey = () => {
+	const now = new Date();
+	now.setHours(0, 0, 0, 0);
+	const year = now.getFullYear();
+	const month = String(now.getMonth() + 1).padStart(2, "0");
+	const day = String(now.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+};
+
 exports.getOperatorBuses = async (req, res) => {
 	try {
 		const operatorId = parseObjectId(req.user?.id);
@@ -149,12 +158,13 @@ exports.getOperatorBuses = async (req, res) => {
 			return res.status(401).json({ message: "Unauthorized" });
 		}
 
-		const buses = await Bus.find({ operator: operatorId }).sort({ name: 1 }).lean();
+		const buses = await Bus.find({ operator: operatorId, isActive: true }).sort({ name: 1 }).lean();
 		const busIds = buses.map((bus) => bus._id).filter(Boolean);
+		const todayDateKey = getTodayDateKey();
 
 		const scheduleCounts = busIds.length > 0
 			? await Schedule.aggregate([
-				{ $match: { bus: { $in: busIds } } },
+				{ $match: { bus: { $in: busIds }, isActive: { $ne: false }, date: { $gte: todayDateKey } } },
 				{ $group: { _id: "$bus", count: { $sum: 1 } } },
 			])
 			: [];

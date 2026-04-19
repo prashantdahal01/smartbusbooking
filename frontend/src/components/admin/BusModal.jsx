@@ -6,7 +6,7 @@ import {
   getBusTypesFromBus,
   normalizeBusTypes,
 } from "../../utils/busTypeUtils";
-import { toAbsoluteAssetUrl } from "../../utils/helpers";
+import { getBusImageUrls } from "../../utils/helpers";
 
 const SEAT_TYPE_OPTIONS = [
   { value: "SEATER", label: "Seater" },
@@ -54,6 +54,31 @@ const TEMPLATE_OPTIONS = [
 ];
 
 const DEFAULT_TEMPLATE = "AC_SEATER_2X2";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const BUS_IMAGE_FIELDS = [
+  {
+    key: "bus",
+    label: "Bus Image",
+    description: "Main bus exterior image used in bus cards.",
+    uploadField: "busImage",
+    removeField: "removeBusImage",
+  },
+  {
+    key: "seatLayout",
+    label: "Seat Layout Image",
+    description: "Cabin/seat arrangement image used in seat selection.",
+    uploadField: "seatLayoutImage",
+    removeField: "removeSeatLayoutImage",
+  },
+  {
+    key: "sleeperLayout",
+    label: "Sleeper Layout Image",
+    description: "Sleeper deck image used for sleeper gallery preview.",
+    uploadField: "sleeperLayoutImage",
+    removeField: "removeSleeperLayoutImage",
+  },
+];
 
 const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
 const sortSeatLabels = (a, b) => String(a || "").localeCompare(String(b || ""), undefined, { numeric: true, sensitivity: "base" });
@@ -329,10 +354,13 @@ const deckGridSeats = (deck, deckIndex) => {
     .sort((a, b) => a.row - b.row || a.column - b.column || sortSeatLabels(a.seatNumber, b.seatNumber));
 };
 
-const getOperatorId = (bus) => {
+const getOperatorEmail = (bus) => {
   if (!bus?.operator) return "";
-  if (typeof bus.operator === "string") return bus.operator;
-  return bus.operator?._id || "";
+  if (typeof bus.operator === "string") {
+    const token = String(bus.operator || "").trim();
+    return token.includes("@") ? token : "";
+  }
+  return String(bus.operator?.email || "").trim();
 };
 
 const getInitialForm = (bus) => {
@@ -341,7 +369,7 @@ const getInitialForm = (bus) => {
     name: String(bus?.name || ""),
     vehicleNumber: String(bus?.vehicleNumber || ""),
     phone: String(bus?.phone || bus?.contactNumber || bus?.busPhone || ""),
-    operator: getOperatorId(bus),
+    operator: getOperatorEmail(bus),
     busTypes,
     refundPolicy: String(bus?.policies?.refundPolicy || ""),
     cancellationPolicy: String(bus?.policies?.cancellationPolicy || ""),
@@ -883,10 +911,23 @@ const EmptyGridCell = memo(function EmptyGridCell({ deckIndex, row, column, mode
 
 EmptyGridCell.displayName = "EmptyGridCell";
 
-export default function BusModal({ open, mode = "create", bus = null, submitting = false, onClose, onSubmit }) {
+export default function BusModal({ open, mode = "create", bus = null, operators = [], submitting = false, onClose, onSubmit }) {
   const [state, dispatch] = useReducer(busModalReducer, bus, createBusModalState);
-  const [imageFile, setImageFile] = useState(null);
-  const [imagePreview, setImagePreview] = useState("");
+  const [imageFiles, setImageFiles] = useState({
+    bus: null,
+    seatLayout: null,
+    sleeperLayout: null,
+  });
+  const [imagePreviews, setImagePreviews] = useState({
+    bus: "",
+    seatLayout: "",
+    sleeperLayout: "",
+  });
+  const [imageRemovals, setImageRemovals] = useState({
+    bus: false,
+    seatLayout: false,
+    sleeperLayout: false,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -894,23 +935,48 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
       type: REDUCER_ACTIONS.RESET_STATE,
       payload: createBusModalState(bus),
     });
-    setImageFile(null);
-    setImagePreview("");
+    setImageFiles({
+      bus: null,
+      seatLayout: null,
+      sleeperLayout: null,
+    });
+    setImagePreviews({
+      bus: "",
+      seatLayout: "",
+      sleeperLayout: "",
+    });
+    setImageRemovals({
+      bus: false,
+      seatLayout: false,
+      sleeperLayout: false,
+    });
   }, [open, bus]);
 
   useEffect(() => {
-    if (!imageFile) {
-      setImagePreview("");
-      return undefined;
-    }
+    const createdPreviewUrls = [];
+    const nextPreviews = {
+      bus: "",
+      seatLayout: "",
+      sleeperLayout: "",
+    };
 
-    const url = URL.createObjectURL(imageFile);
-    setImagePreview(url);
+    BUS_IMAGE_FIELDS.forEach((field) => {
+      const file = imageFiles?.[field.key];
+      if (!file) return;
+
+      const objectUrl = URL.createObjectURL(file);
+      createdPreviewUrls.push(objectUrl);
+      nextPreviews[field.key] = objectUrl;
+    });
+
+    setImagePreviews(nextPreviews);
 
     return () => {
-      URL.revokeObjectURL(url);
+      createdPreviewUrls.forEach((url) => {
+        URL.revokeObjectURL(url);
+      });
     };
-  }, [imageFile]);
+  }, [imageFiles]);
 
   const totalSeats = useMemo(() => {
     return (Array.isArray(state.form.decks) ? state.form.decks : []).reduce(
@@ -939,6 +1005,83 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
     if (submitting) return;
     onClose();
   }, [onClose, submitting]);
+
+  const existingImageUrls = useMemo(() => getBusImageUrls(bus), [bus]);
+  const operatorEmailOptions = useMemo(() => {
+    const source = Array.isArray(operators) ? operators : [];
+    const seen = new Set();
+
+    return source
+      .map((operator) => {
+        const email = String(operator?.email || "").trim().toLowerCase();
+        if (!email || seen.has(email)) return null;
+        seen.add(email);
+
+        return {
+          email,
+          name: String(operator?.name || "").trim(),
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.email.localeCompare(right.email, undefined, { sensitivity: "base" }));
+  }, [operators]);
+
+  const resolvedImageUrls = useMemo(() => {
+    const next = {
+      bus: "",
+      seatLayout: "",
+      sleeperLayout: "",
+    };
+
+    BUS_IMAGE_FIELDS.forEach((field) => {
+      const key = field.key;
+      const preview = String(imagePreviews?.[key] || "").trim();
+      if (preview) {
+        next[key] = preview;
+        return;
+      }
+
+      if (imageRemovals?.[key]) {
+        next[key] = "";
+        return;
+      }
+
+      next[key] = String(existingImageUrls?.[key] || "").trim();
+    });
+
+    return next;
+  }, [existingImageUrls, imagePreviews, imageRemovals]);
+
+  const handleImageFileChange = useCallback((imageKey, file) => {
+    setImageFiles((prev) => ({
+      ...prev,
+      [imageKey]: file || null,
+    }));
+
+    setImageRemovals((prev) => ({
+      ...prev,
+      [imageKey]: false,
+    }));
+  }, []);
+
+  const handleRemoveImage = useCallback((imageKey) => {
+    setImageFiles((prev) => ({
+      ...prev,
+      [imageKey]: null,
+    }));
+
+    setImageRemovals((prev) => ({
+      ...prev,
+      [imageKey]: true,
+    }));
+  }, []);
+
+  const handleUndoRemoveImage = useCallback((imageKey) => {
+    setImageRemovals((prev) => ({
+      ...prev,
+      [imageKey]: false,
+    }));
+  }, []);
 
   const handleFormFieldChange = useCallback((field, value) => {
     dispatch({
@@ -1036,7 +1179,7 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
     const name = String(state.form.name || "").trim();
     const vehicleNumber = String(state.form.vehicleNumber || "").trim();
     const busPhone = String(state.form.phone || "").trim();
-    const operator = String(state.form.operator || "").trim();
+    const operatorEmail = String(state.form.operator || "").trim().toLowerCase();
     const busTypes = normalizeBusTypes(state.form.busTypes);
 
     if (!name) {
@@ -1051,6 +1194,11 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
 
     if (new Set(busTypes).size !== busTypes.length) {
       dispatch({ type: REDUCER_ACTIONS.SET_FEEDBACK, payload: { error: "Duplicate bus types are not allowed." } });
+      return;
+    }
+
+    if (operatorEmail && !EMAIL_RE.test(operatorEmail)) {
+      dispatch({ type: REDUCER_ACTIONS.SET_FEEDBACK, payload: { error: "Operator email must be a valid email address." } });
       return;
     }
 
@@ -1167,20 +1315,27 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
     if (busPhone) payload.append("phone", busPhone);
     else if (mode === "edit") payload.append("phone", "");
 
-    if (operator) payload.append("operator", operator);
-    else if (mode === "edit") payload.append("operator", "");
+    if (operatorEmail) payload.append("operatorEmail", operatorEmail);
+    else if (mode === "edit") payload.append("operatorEmail", "");
 
     payload.append("refundPolicy", String(state.form.refundPolicy || "").trim());
     payload.append("cancellationPolicy", String(state.form.cancellationPolicy || "").trim());
     payload.append("dateChangePolicy", String(state.form.dateChangePolicy || "").trim());
     payload.append("luggagePolicy", String(state.form.luggagePolicy || "").trim());
 
-    if (imageFile) payload.append("image", imageFile);
+    BUS_IMAGE_FIELDS.forEach((field) => {
+      const selectedFile = imageFiles?.[field.key];
+      if (selectedFile) {
+        payload.append(field.uploadField, selectedFile);
+      }
+
+      if (mode === "edit" && imageRemovals?.[field.key]) {
+        payload.append(field.removeField, "true");
+      }
+    });
 
     onSubmit(payload);
   };
-
-  const activeImage = imagePreview || toAbsoluteAssetUrl(bus?.imageUrl);
 
   if (!open) return null;
 
@@ -1248,13 +1403,20 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Operator ID</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Operator Email Address</label>
               <input
                 value={state.form.operator}
                 onChange={(event) => handleFormFieldChange("operator", event.target.value)}
-                placeholder="Optional"
+                list="bus-operator-email-options"
+                placeholder="operator@example.com"
                 className="mt-1 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-200 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
               />
+              <datalist id="bus-operator-email-options">
+                {operatorEmailOptions.map((option) => (
+                  <option key={option.email} value={option.email}>{option.name ? `${option.name} (${option.email})` : option.email}</option>
+                ))}
+              </datalist>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Use an active operator email. Leave blank to keep unassigned.</p>
             </div>
 
             <div>
@@ -1571,25 +1733,60 @@ export default function BusModal({ open, mode = "create", bus = null, submitting
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Bus Image</label>
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(event) => setImageFile(event.target.files?.[0] || null)}
-                className="mt-1 block w-full text-xs text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:font-semibold file:text-slate-700 hover:file:bg-slate-300 dark:text-slate-300 dark:file:bg-slate-700 dark:file:text-slate-200"
-              />
-            </div>
+            <div className="sm:col-span-2 grid gap-3 lg:grid-cols-3">
+              {BUS_IMAGE_FIELDS.map((field) => {
+                const previewUrl = resolvedImageUrls?.[field.key];
+                const removalPending = Boolean(imageRemovals?.[field.key]);
+                const hasSelectedFile = Boolean(imageFiles?.[field.key]);
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Preview</label>
-              {activeImage ? (
-                <img src={activeImage} alt="Bus preview" className="mt-1 h-28 w-full rounded-lg object-cover" />
-              ) : (
-                <div className="mt-1 grid h-28 place-items-center rounded-lg border border-dashed border-slate-300 text-xs text-slate-500 dark:border-slate-600 dark:text-slate-400">
-                  No image selected
-                </div>
-              )}
+                return (
+                  <div key={field.key} className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">{field.label}</label>
+                        <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">{field.description}</p>
+                      </div>
+
+                      {removalPending ? (
+                        <button
+                          type="button"
+                          onClick={() => handleUndoRemoveImage(field.key)}
+                          className="rounded-md border border-slate-200 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                        >
+                          Undo
+                        </button>
+                      ) : previewUrl ? (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveImage(field.key)}
+                          className="rounded-md border border-rose-200 px-2 py-1 text-[11px] font-semibold text-rose-600 hover:bg-rose-50 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
+                        >
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/jpg,image/webp"
+                      onChange={(event) => handleImageFileChange(field.key, event.target.files?.[0] || null)}
+                      className="mt-2 block w-full text-xs text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-200 file:px-3 file:py-1.5 file:font-semibold file:text-slate-700 hover:file:bg-slate-300 dark:text-slate-300 dark:file:bg-slate-700 dark:file:text-slate-200"
+                    />
+
+                    {previewUrl ? (
+                      <img src={previewUrl} alt={`${field.label} preview`} className="mt-2 h-28 w-full rounded-lg object-cover" />
+                    ) : (
+                      <div className="mt-2 grid h-28 place-items-center rounded-lg border border-dashed border-slate-300 text-xs text-slate-500 dark:border-slate-600 dark:text-slate-400">
+                        {removalPending
+                          ? `${field.label} will be removed`
+                          : hasSelectedFile
+                            ? "Preview unavailable"
+                            : "No image selected"}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </section>
 

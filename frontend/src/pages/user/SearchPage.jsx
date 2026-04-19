@@ -10,12 +10,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import BusResultCard from "../../components/search/BusResultCard";
 import FilterSidebar from "../../components/search/FilterSidebar";
+import DatePicker from "../../components/search/DatePicker";
 import LocationAutocompleteInput from "../../components/search/LocationAutocompleteInput";
 import FilterTagList from "../../components/search/FilterTagList";
 import SearchHeader from "../../components/search/SearchHeader";
 import { searchSchedules } from "../../services/booking.service";
 import { getBusTypeLabels } from "../../utils/busTypeUtils";
-import { toAbsoluteAssetUrl } from "../../utils/helpers";
+import { getBusImageUrl } from "../../utils/helpers";
 
 const SORT_OPTIONS = [
   { value: "recommended", label: "Recommended" },
@@ -133,6 +134,14 @@ const formatDateLabel = (date) => {
     day: "2-digit",
     year: "numeric",
   });
+};
+
+const getTodayDateKey = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 };
 
 const formatDuration = (schedule, departureMinutes, arrivalMinutes) => {
@@ -276,7 +285,9 @@ const mapScheduleToViewModel = (schedule) => {
     durationMinutes: Number(schedule?.durationMinutes) || null,
     availableSeats,
     startingPrice,
-    imageUrl: toAbsoluteAssetUrl(schedule?.bus?.imageUrl),
+    imageUrl: getBusImageUrl(schedule?.bus, "bus"),
+    seatLayoutImageUrl: getBusImageUrl(schedule?.bus, "seatLayout"),
+    sleeperLayoutImageUrl: getBusImageUrl(schedule?.bus, "sleeperLayout"),
     busTypeLabels,
     seatTypeTokens: getSeatTypeTokens(schedule),
     shift: departureMinutes !== null && (departureMinutes >= 1080 || departureMinutes < 360) ? "night" : "day",
@@ -317,6 +328,7 @@ export default function SearchPage() {
 
   const [sortBy, setSortBy] = useState("recommended");
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const todayDate = useMemo(() => getTodayDateKey(), []);
 
   const [filters, setFilters] = useState(INITIAL_FILTERS);
 
@@ -627,17 +639,12 @@ export default function SearchPage() {
               highlightClassName="font-semibold text-violet-700"
             />
 
-            <label className="block">
+            <div className="block">
               <span className="mb-1.5 inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
                 Date
               </span>
-              <input
-                type="date"
-                value={date}
-                onChange={(event) => setDate(event.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-800 outline-none transition focus:border-violet-300 focus:bg-white focus:ring-4 focus:ring-violet-100"
-              />
-            </label>
+              <DatePicker value={date} onChange={setDate} minDate={todayDate} />
+            </div>
 
             <button
               type="submit"

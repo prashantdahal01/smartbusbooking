@@ -48,3 +48,75 @@ export function toAbsoluteAssetUrl(assetPath) {
 	if (!origin) return p;
 	return `${origin}${p.startsWith("/") ? "" : "/"}${p}`;
 }
+
+const BUS_IMAGE_TYPE_ALIASES = {
+	bus: "bus",
+	main: "bus",
+	image: "bus",
+	exterior: "bus",
+	seat: "seatLayout",
+	"seat-layout": "seatLayout",
+	seatlayout: "seatLayout",
+	layout: "seatLayout",
+	sleeper: "sleeperLayout",
+	"sleeper-layout": "sleeperLayout",
+	sleeperlayout: "sleeperLayout",
+};
+
+function normalizeBusImageType(type) {
+	const token = String(type || "bus")
+		.trim()
+		.toLowerCase()
+		.replace(/[\s_]+/g, "-");
+	return BUS_IMAGE_TYPE_ALIASES[token] || "";
+}
+
+function toSafeImagePath(value) {
+	return String(value || "").trim();
+}
+
+function readImagePathFromArray(images, normalizedType) {
+	if (!Array.isArray(images)) return "";
+
+	for (const item of images) {
+		const type = normalizeBusImageType(item?.type);
+		if (!type || type !== normalizedType) continue;
+
+		const url = toSafeImagePath(item?.url);
+		if (url) return url;
+	}
+
+	return "";
+}
+
+export function getBusImagePath(bus, type = "bus") {
+	const normalizedType = normalizeBusImageType(type) || "bus";
+	const images = bus?.images;
+
+	if (images && typeof images === "object" && !Array.isArray(images)) {
+		const directPath = toSafeImagePath(images?.[normalizedType]);
+		if (directPath) return directPath;
+	}
+
+	const fromArray = readImagePathFromArray(images, normalizedType);
+	if (fromArray) return fromArray;
+
+	if (normalizedType === "bus") {
+		const legacy = toSafeImagePath(bus?.imageUrl || bus?.image);
+		if (legacy) return legacy;
+	}
+
+	return "";
+}
+
+export function getBusImageUrl(bus, type = "bus") {
+	return toAbsoluteAssetUrl(getBusImagePath(bus, type));
+}
+
+export function getBusImageUrls(bus) {
+	return {
+		bus: getBusImageUrl(bus, "bus"),
+		seatLayout: getBusImageUrl(bus, "seatLayout"),
+		sleeperLayout: getBusImageUrl(bus, "sleeperLayout"),
+	};
+}

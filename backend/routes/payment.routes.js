@@ -6,6 +6,7 @@ const { verifyToken } = require("../middleware/auth.middleware");
 
 // Initiate eSewa payment (requires logged-in user)
 router.post("/esewa/initiate", verifyToken, paymentController.initiateEsewaPayment);
+router.post("/esewa/retry", verifyToken, paymentController.retryEsewaPayment);
 
 // eSewa redirects the user back to these URLs (no auth header available)
 router.get("/esewa/success", paymentController.handleEsewaSuccess);

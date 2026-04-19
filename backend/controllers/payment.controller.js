@@ -1,5 +1,6 @@
 // Handles eSewa (ePay v2) payment initiation and callback verification
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 
 const Booking = require("../models/Booking");
 const Schedule = require("../models/Schedule");
@@ -7,6 +8,12 @@ const { seatLockService } = require("../algorithms/seatLock");
 const { sendTicketEmailSafely } = require("../utils/mailer");
 const { createAdminNotification } = require("../services/notification.service");
 const { buildRouteOrderIndex } = require("../utils/routePoints");
+const {
+	BOOKING_STATUS,
+	PAYMENT_STATUS,
+	normalizeBookingDocument,
+	isRetryablePendingBooking,
+} = require("../utils/bookingState");
 
 const DEFAULT_SEAT_PRICE = 0;
 
@@ -231,6 +238,18 @@ const parseIsoDateTimeMs = (date, time) => {
 	return new Date(`${d}T${t}:00`).getTime();
 };
 
+const parseDateStartMs = (date) => {
+	const safeDate = String(date || "").trim();
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) return NaN;
+	return new Date(`${safeDate}T00:00:00`).getTime();
+};
+
+const getTodayStartMs = () => {
+	const now = new Date();
+	now.setHours(0, 0, 0, 0);
+	return now.getTime();
+};
+
 const getEsewaConfig = () => {
 	const productCode = process.env.ESEWA_PRODUCT_CODE || "EPAYTEST";
 	const secretKey = process.env.ESEWA_SECRET_KEY || "8gBm/:&EnhH.1/q";
@@ -285,6 +304,91 @@ const checkEsewaStatus = async ({ statusUrlBase, productCode, totalAmount, trans
 	return resp.json();
 };
 
+const getBookingScheduleId = (booking) => booking?.schedule?._id || booking?.schedule;
+
+const isScheduleUnavailable = (schedule) => {
+	const scheduleDateMs = parseDateStartMs(schedule?.date);
+	return schedule?.isActive === false
+		|| schedule?.bus?.isActive === false
+		|| !Number.isFinite(scheduleDateMs)
+		|| scheduleDateMs < getTodayStartMs();
+};
+
+const ensureBookingStateNormalized = async (booking) => {
+	const normalized = normalizeBookingDocument(booking);
+	if (normalized.changed) {
+		await booking.save();
+	}
+	return normalized;
+};
+
+const validateBookingLocks = async (booking, userId) => {
+	return seatLockService.validateLocks({
+		scheduleId: getBookingScheduleId(booking),
+		seats: booking?.seats,
+		userId: userId || booking?.user?._id || booking?.user,
+	});
+};
+
+const releaseBookingLocks = async (booking) => {
+	await seatLockService.releaseLocks({
+		scheduleId: getBookingScheduleId(booking),
+		seats: booking?.seats,
+		allowEmptySeats: true,
+	}).catch(() => {});
+};
+
+const markBookingCancelled = async (booking, { gatewayStatus = "LOCK_EXPIRED", raw = null } = {}) => {
+	booking.payment = booking.payment || { provider: "esewa" };
+	booking.status = BOOKING_STATUS.CANCELLED;
+	booking.payment.status = PAYMENT_STATUS.FAILED;
+	booking.payment.gatewayStatus = gatewayStatus;
+	if (raw) booking.payment.raw = raw;
+	await booking.save();
+	await releaseBookingLocks(booking);
+};
+
+const markBookingFailedForRetry = async (booking, { gatewayStatus = "PAYMENT_FAILED", raw = null } = {}) => {
+	booking.payment = booking.payment || { provider: "esewa" };
+	booking.status = BOOKING_STATUS.PENDING;
+	booking.payment.status = PAYMENT_STATUS.FAILED;
+	booking.payment.gatewayStatus = gatewayStatus;
+	if (raw) booking.payment.raw = raw;
+	await booking.save();
+};
+
+const buildEsewaFormFields = ({ booking, productCode, secretKey }) => {
+	const publicBaseUrl = getPublicBaseUrl();
+	const totalAmount = booking.payment?.totalAmount ?? booking.totalPrice;
+	const transactionUuid = booking.payment?.transactionUuid;
+
+	if (!transactionUuid) {
+		throw new Error("Payment transaction UUID missing");
+	}
+
+	const signedFieldNames = "total_amount,transaction_uuid,product_code";
+	const signature = makeSignature({
+		totalAmount,
+		transactionUuid,
+		productCode,
+		secretKey,
+	});
+
+	return {
+		amount: String(totalAmount),
+		tax_amount: "0",
+		product_service_charge: "0",
+		product_delivery_charge: "0",
+		total_amount: String(totalAmount),
+		transaction_uuid: String(transactionUuid),
+		product_code: String(productCode),
+		success_url: `${publicBaseUrl}/api/payments/esewa/success`,
+		failure_url: `${publicBaseUrl}/api/payments/esewa/failure`,
+		signed_field_names: signedFieldNames,
+		signature,
+	};
+};
+
 exports.initiateEsewaPayment = async (req, res) => {
 	try {
 		const { scheduleId, seats } = req.body;
@@ -323,6 +427,20 @@ exports.initiateEsewaPayment = async (req, res) => {
 		if (!schedule) return res.status(404).json({ message: "Schedule not found" });
 		if (!schedule.route) return res.status(400).json({ message: "Schedule route missing" });
 		if (!schedule.bus) return res.status(400).json({ message: "Schedule bus not configured" });
+		if (schedule?.isActive === false) {
+			return res.status(400).json({ message: "Schedule is no longer active" });
+		}
+		if (schedule?.bus?.isActive === false) {
+			return res.status(400).json({ message: "Selected bus is no longer available" });
+		}
+
+		const scheduleDateMs = parseDateStartMs(schedule?.date);
+		if (!Number.isFinite(scheduleDateMs)) {
+			return res.status(400).json({ message: "Schedule travel date is invalid" });
+		}
+		if (scheduleDateMs < getTodayStartMs()) {
+			return res.status(400).json({ message: "Cannot book past schedules" });
+		}
 
 		const selectedBoardingPoint = pickSchedulePoint(schedule.boardingPoints, boardingPointName);
 		if (!selectedBoardingPoint) {
@@ -409,7 +527,7 @@ exports.initiateEsewaPayment = async (req, res) => {
 		}
 
 		// Extend lock TTL from payment initiation to reduce gateway timeout risk.
-		await seatLockService.lockSeats({
+		const lockResult = await seatLockService.lockSeats({
 			scheduleId,
 			seats: normalizedSeats,
 			userId: req.user.id,
@@ -428,10 +546,10 @@ exports.initiateEsewaPayment = async (req, res) => {
 			user: req.user.id,
 			schedule: scheduleId,
 			seats: normalizedSeats,
-			status: "payment_pending",
+			status: { $in: [BOOKING_STATUS.PENDING, "payment_pending", "payment_failed"] },
 			"payment.provider": "esewa",
-			"payment.status": "initiated",
-		});
+			"payment.status": { $in: [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.FAILED, "initiated"] },
+		}).sort({ createdAt: -1 });
 
 		if (!booking) {
 			booking = await Booking.create({
@@ -445,53 +563,49 @@ exports.initiateEsewaPayment = async (req, res) => {
 				seatPriceBreakdown,
 				pricePerSeat,
 				totalPrice,
-				status: "payment_pending",
+				status: BOOKING_STATUS.PENDING,
 				payment: {
 					provider: "esewa",
-					status: "initiated",
-					productCode: productCode,
+					status: PAYMENT_STATUS.PENDING,
+					productCode,
 					totalAmount: totalPrice,
 					transactionUuid: crypto.randomUUID(),
 				},
 			});
 		} else {
+			const normalizedState = await ensureBookingStateNormalized(booking);
+
 			booking.passenger = passenger;
 			booking.passengers = passengers;
 			booking.boardingPoint = selectedBoardingPoint;
 			booking.droppingPoint = selectedDroppingPoint;
+			booking.seatPriceBreakdown = seatPriceBreakdown;
+			booking.pricePerSeat = pricePerSeat;
+			booking.totalPrice = totalPrice;
+			booking.status = BOOKING_STATUS.PENDING;
+			booking.payment = booking.payment || { provider: "esewa" };
+			booking.payment.provider = "esewa";
+			booking.payment.status = PAYMENT_STATUS.PENDING;
+			booking.payment.productCode = productCode;
+			booking.payment.totalAmount = totalPrice;
+			booking.payment.paidAt = undefined;
+
+			if (!booking.payment.transactionUuid || normalizedState.paymentStatus === PAYMENT_STATUS.FAILED) {
+				booking.payment.transactionUuid = crypto.randomUUID();
+			}
+
 			await booking.save();
 		}
 
-		const publicBaseUrl = getPublicBaseUrl();
-		const totalAmount = booking.payment?.totalAmount ?? booking.totalPrice;
-		const transactionUuid = booking.payment?.transactionUuid;
-		if (!transactionUuid) {
-			return res.status(500).json({ message: "Payment transaction UUID missing" });
-		}
+		const fields = buildEsewaFormFields({ booking, productCode, secretKey });
 
-		const signedFieldNames = "total_amount,transaction_uuid,product_code";
-		const signature = makeSignature({
-			totalAmount,
-			transactionUuid,
-			productCode,
-			secretKey,
+		return res.json({
+			bookingId: booking._id,
+			formUrl,
+			fields,
+			lockExpiresAt: lockResult?.expiresAt || null,
+			lockDurationMs: lockResult?.lockDurationMs || seatLockService.getLockDurationMs(),
 		});
-
-		const fields = {
-			amount: String(totalAmount),
-			tax_amount: "0",
-			product_service_charge: "0",
-			product_delivery_charge: "0",
-			total_amount: String(totalAmount),
-			transaction_uuid: String(transactionUuid),
-			product_code: String(productCode),
-			success_url: `${publicBaseUrl}/api/payments/esewa/success`,
-			failure_url: `${publicBaseUrl}/api/payments/esewa/failure`,
-			signed_field_names: signedFieldNames,
-			signature,
-		};
-
-		return res.json({ bookingId: booking._id, formUrl, fields });
 	} catch (e) {
 		const formatted = seatLockService.formatError(e);
 		return res.status(formatted.statusCode).json(formatted.payload);
@@ -515,7 +629,28 @@ exports.handleEsewaSuccess = async (req, res) => {
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=error`);
 		}
 
-		if (booking.status === "confirmed" && booking.payment?.status === "paid") {
+		const normalizedState = await ensureBookingStateNormalized(booking);
+
+		if (isScheduleUnavailable(booking?.schedule)) {
+			await markBookingCancelled(booking, {
+				gatewayStatus: "SCHEDULE_UNAVAILABLE",
+				raw: { success: decoded },
+			});
+			return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
+		}
+
+		if (normalizedState.bookingStatus === BOOKING_STATUS.CANCELLED) {
+			return res.redirect(`${frontendBaseUrl}/dashboard?payment=expired&bookingId=${booking._id}`);
+		}
+
+		if (normalizedState.bookingStatus === BOOKING_STATUS.CONFIRMED) {
+			if (normalizedState.paymentStatus !== PAYMENT_STATUS.PAID) {
+				booking.payment = booking.payment || { provider: "esewa" };
+				booking.payment.status = PAYMENT_STATUS.PAID;
+				booking.payment.paidAt = booking.payment.paidAt || new Date();
+				await booking.save();
+			}
+
 			if (!booking.payment?.emailSentAt) {
 				const ok = await sendTicketEmailSafely(booking);
 				if (!ok) {
@@ -524,6 +659,15 @@ exports.handleEsewaSuccess = async (req, res) => {
 				}
 			}
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=success&bookingId=${booking._id}`);
+		}
+
+		const lockValidation = await validateBookingLocks(booking);
+		if (!lockValidation.valid) {
+			await markBookingCancelled(booking, {
+				gatewayStatus: "LOCK_EXPIRED",
+				raw: { success: decoded, lockValidation },
+			});
+			return res.redirect(`${frontendBaseUrl}/dashboard?payment=expired&bookingId=${booking._id}`);
 		}
 
 		const { statusUrlBase, productCode } = getEsewaConfig();
@@ -544,12 +688,12 @@ exports.handleEsewaSuccess = async (req, res) => {
 		if (gatewayStatus === "COMPLETE") {
 			try {
 				await seatLockService.confirmBooking({
-					scheduleId: booking.schedule?._id || booking.schedule,
+					scheduleId: getBookingScheduleId(booking),
 					seats: booking.seats,
 					userId: booking.user?._id || booking.user,
 					confirmFn: async () => {
-						booking.status = "confirmed";
-						booking.payment.status = "paid";
+						booking.status = BOOKING_STATUS.CONFIRMED;
+						booking.payment.status = PAYMENT_STATUS.PAID;
 						booking.payment.paidAt = booking.payment.paidAt || new Date();
 						await booking.save();
 						return booking;
@@ -557,16 +701,11 @@ exports.handleEsewaSuccess = async (req, res) => {
 				});
 			} catch (error) {
 				if (seatLockService.isSeatLockError(error)) {
-					booking.status = "payment_failed";
-					booking.payment.status = "failed";
-					await booking.save();
-
-					await seatLockService.releaseLocks({
-						scheduleId: booking.schedule?._id || booking.schedule,
-						seats: booking.seats,
-						allowEmptySeats: true,
-					}).catch(() => {});
-					return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
+					await markBookingCancelled(booking, {
+						gatewayStatus: "LOCK_EXPIRED",
+						raw: { success: decoded, status, error: String(error?.message || "") },
+					});
+					return res.redirect(`${frontendBaseUrl}/dashboard?payment=expired&bookingId=${booking._id}`);
 				}
 				throw error;
 			}
@@ -592,15 +731,10 @@ exports.handleEsewaSuccess = async (req, res) => {
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=success&bookingId=${booking._id}`);
 		}
 
-		booking.status = "payment_failed";
-		booking.payment.status = "failed";
-		await booking.save();
-
-		await seatLockService.releaseLocks({
-			scheduleId: booking.schedule?._id || booking.schedule,
-			seats: booking.seats,
-			allowEmptySeats: true,
-		}).catch(() => {});
+		await markBookingFailedForRetry(booking, {
+			gatewayStatus,
+			raw: { success: decoded, status },
+		});
 
 		return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
 	} catch (e) {
@@ -621,17 +755,24 @@ exports.handleEsewaFailure = async (req, res) => {
 
 		const booking = await Booking.findOne({ "payment.transactionUuid": String(transactionUuid) });
 		if (booking) {
-			booking.status = "payment_failed";
-			booking.payment = booking.payment || { provider: "esewa" };
-			booking.payment.status = "failed";
-			booking.payment.raw = { failure: decoded };
-			await booking.save();
+			const normalizedState = await ensureBookingStateNormalized(booking);
+			if (normalizedState.bookingStatus === BOOKING_STATUS.CANCELLED) {
+				return res.redirect(`${frontendBaseUrl}/dashboard?payment=expired&bookingId=${booking._id}`);
+			}
 
-			await seatLockService.releaseLocks({
-				scheduleId: booking.schedule,
-				seats: booking.seats,
-				allowEmptySeats: true,
-			}).catch(() => {});
+			const lockValidation = await validateBookingLocks(booking);
+			if (!lockValidation.valid) {
+				await markBookingCancelled(booking, {
+					gatewayStatus: "LOCK_EXPIRED",
+					raw: { failure: decoded, lockValidation },
+				});
+				return res.redirect(`${frontendBaseUrl}/dashboard?payment=expired&bookingId=${booking._id}`);
+			}
+
+			await markBookingFailedForRetry(booking, {
+				gatewayStatus: "FAILED",
+				raw: { failure: decoded },
+			});
 
 			return res.redirect(`${frontendBaseUrl}/dashboard?payment=failure&bookingId=${booking._id}`);
 		}
@@ -641,5 +782,104 @@ exports.handleEsewaFailure = async (req, res) => {
 		// eslint-disable-next-line no-console
 		console.error(e);
 		return res.redirect(`${frontendBaseUrl}/dashboard?payment=error`);
+	}
+};
+
+exports.retryEsewaPayment = async (req, res) => {
+	try {
+		const bookingId = String(req.body?.bookingId || "").trim();
+		if (!mongoose.isValidObjectId(bookingId)) {
+			return res.status(400).json({ message: "Valid bookingId is required" });
+		}
+
+		const booking = await Booking.findOne({ _id: bookingId, user: req.user.id })
+			.populate({ path: "schedule", populate: [{ path: "bus" }, { path: "route" }] });
+
+		if (!booking) {
+			return res.status(404).json({ message: "Booking not found" });
+		}
+
+		const normalizedState = await ensureBookingStateNormalized(booking);
+
+		if (normalizedState.bookingStatus === BOOKING_STATUS.CONFIRMED && normalizedState.paymentStatus === PAYMENT_STATUS.PAID) {
+			return res.status(409).json({ message: "Booking is already paid" });
+		}
+
+		if (normalizedState.bookingStatus === BOOKING_STATUS.CANCELLED) {
+			return res.status(409).json({ message: "Booking is already cancelled" });
+		}
+
+		if (!isRetryablePendingBooking(normalizedState)) {
+			return res.status(409).json({ message: "Only pending bookings can be retried" });
+		}
+
+		if (isScheduleUnavailable(booking?.schedule)) {
+			await markBookingCancelled(booking, { gatewayStatus: "SCHEDULE_UNAVAILABLE" });
+			return res.status(409).json({
+				message: "Schedule is no longer available",
+				bookingStatus: BOOKING_STATUS.CANCELLED,
+				paymentStatus: PAYMENT_STATUS.FAILED,
+			});
+		}
+
+		const lockValidation = await validateBookingLocks(booking, req.user.id);
+		if (!lockValidation.valid) {
+			await markBookingCancelled(booking, {
+				gatewayStatus: "LOCK_EXPIRED",
+				raw: { retryDenied: true, lockValidation },
+			});
+
+			return res.status(409).json({
+				message: "Seat lock expired. Please reselect seats to retry payment.",
+				bookingStatus: BOOKING_STATUS.CANCELLED,
+				paymentStatus: PAYMENT_STATUS.FAILED,
+				failedSeats: [...lockValidation.missingLocks, ...lockValidation.conflictSeats],
+			});
+		}
+
+		const lockResult = await seatLockService.lockSeats({
+			scheduleId: getBookingScheduleId(booking),
+			seats: booking.seats,
+			userId: req.user.id,
+			sessionId: req.body?.sessionId,
+		});
+
+		const { productCode, secretKey, formUrl } = getEsewaConfig();
+		const totalAmount = Number(booking.payment?.totalAmount ?? booking.totalPrice);
+		if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+			return res.status(400).json({ message: "Invalid booking amount for retry" });
+		}
+
+		const priorRetryCount = Number(booking.payment?.raw?.retryCount || 0);
+
+		booking.status = BOOKING_STATUS.PENDING;
+		booking.payment = booking.payment || { provider: "esewa" };
+		booking.payment.provider = "esewa";
+		booking.payment.status = PAYMENT_STATUS.PENDING;
+		booking.payment.productCode = productCode;
+		booking.payment.totalAmount = totalAmount;
+		booking.payment.transactionUuid = crypto.randomUUID();
+		booking.payment.refId = undefined;
+		booking.payment.paidAt = undefined;
+		booking.payment.gatewayStatus = "RETRY_INITIATED";
+		booking.payment.raw = {
+			retryCount: priorRetryCount + 1,
+			retryInitiatedAt: new Date().toISOString(),
+		};
+
+		await booking.save();
+
+		const fields = buildEsewaFormFields({ booking, productCode, secretKey });
+
+		return res.json({
+			bookingId: booking._id,
+			formUrl,
+			fields,
+			lockExpiresAt: lockResult?.expiresAt || null,
+			lockDurationMs: lockResult?.lockDurationMs || seatLockService.getLockDurationMs(),
+		});
+	} catch (e) {
+		const formatted = seatLockService.formatError(e);
+		return res.status(formatted.statusCode).json(formatted.payload);
 	}
 };

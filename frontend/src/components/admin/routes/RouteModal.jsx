@@ -69,7 +69,7 @@ const parsePointsText = (value, laneLabel) => {
   }
 
   if (out.length === 0) {
-    return { ok: false, message: `${laneLabel}: at least one point is required` };
+    return { ok: true, value: [] };
   }
 
   return {
@@ -266,7 +266,7 @@ export default function RouteModal({
           <div className="grid gap-4 md:grid-cols-2">
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Boarding Points</label>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Format: Name|HH:mm|Order (order optional)</p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Optional. Format: Name|HH:mm|Order (order optional). Leave blank to default from source.</p>
               <textarea
                 rows={8}
                 value={form.boardingPointsText}
@@ -278,7 +278,7 @@ export default function RouteModal({
 
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Dropping Points</label>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Format: Name|HH:mm|Order (order optional)</p>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Optional. Format: Name|HH:mm|Order (order optional). Leave blank to default from destination.</p>
               <textarea
                 rows={8}
                 value={form.droppingPointsText}

@@ -164,6 +164,20 @@ const parseDateStartMs = (dateText) => {
 	return new Date(`${safeDate}T00:00:00`).getTime();
 };
 
+const getTodayStartDate = () => {
+	const now = new Date();
+	now.setHours(0, 0, 0, 0);
+	return now;
+};
+
+const getTodayDateKey = () => toLocalDateString(getTodayStartDate().getTime());
+
+const isPastScheduleDate = (dateText, todayStartMs = getTodayStartDate().getTime()) => {
+	const scheduleDateMs = parseDateStartMs(dateText);
+	if (!Number.isFinite(scheduleDateMs)) return true;
+	return scheduleDateMs < todayStartMs;
+};
+
 const normalizeStringArray = (value) => {
 	if (value === undefined) return undefined;
 
@@ -341,29 +355,68 @@ const buildSchedulePointsFromRoute = ({ route, date, time, arrivalDate, arrivalT
 	};
 };
 
+const buildPointNameKeySet = (points = []) => {
+	const out = new Set();
+	(Array.isArray(points) ? points : []).forEach((point) => {
+		const key = normalizeKey(point?.name);
+		if (!key) return;
+		out.add(key);
+	});
+	return out;
+};
+
+const laneCoverageMissing = ({ schedulePoints, routeLanePoints }) => {
+	const routeKeys = buildPointNameKeySet(routeLanePoints);
+	if (routeKeys.size === 0) return false;
+
+	const scheduleKeys = buildPointNameKeySet(schedulePoints);
+	for (const key of routeKeys) {
+		if (!scheduleKeys.has(key)) return true;
+	}
+
+	return false;
+};
+
 exports.searchSchedules = async (req, res) => {
 	try {
-		const { source, destination, date } = req.query;
+		const { source, destination, date, travelDate } = req.query;
+		const requestedDateValue = date ?? travelDate;
 		const includeRoutePlan = shouldIncludeRoutePlan(req.query?.includeRoutePlan);
 		const sourceText = normalizeText(source);
 		const destinationText = normalizeText(destination);
 		const shouldApplySegmentFilter = Boolean(sourceText || destinationText);
+		const todayDateKey = getTodayDateKey();
 		const filter = { isActive: { $ne: false } };
-		if (date) filter.date = String(date);
+
+		if (requestedDateValue !== undefined) {
+			const requestedDate = normalizeText(requestedDateValue);
+			if (!isValidDateYYYYMMDD(requestedDate)) {
+				return res.status(400).json({ message: "date must be in YYYY-MM-DD format" });
+			}
+			filter.date = requestedDate;
+		}
 
 		const schedules = await Schedule.find(filter)
 			.populate({
 				path: "bus",
+				match: { isActive: true },
 				populate: { path: "operator", select: "name email" },
 			})
 			.populate("route");
 
+		const validSchedules = schedules.filter((schedule) => {
+			if (!schedule?.bus) return false;
+			const scheduleDateKey = normalizeText(schedule?.date);
+			if (!isValidDateYYYYMMDD(scheduleDateKey)) return false;
+			return scheduleDateKey >= todayDateKey;
+		});
+
 		const compatibleSchedules = shouldApplySegmentFilter
-			? await routeSegmentService.filterSchedulesBySegment(schedules, sourceText, destinationText, {
+			? await routeSegmentService.filterSchedulesBySegment(validSchedules, sourceText, destinationText, {
 				requireBoth: false,
 				allowPartial: true,
 			})
-			: routeSegmentService.normalizeSchedulesForOutput(schedules);
+			: routeSegmentService.normalizeSchedulesForOutput(validSchedules);
 
 		if (!includeRoutePlan) {
 			return res.json(compatibleSchedules);
@@ -397,8 +450,12 @@ exports.getDistrictRoutePlan = async (req, res) => {
 
 exports.getSearchOptions = async (req, res) => {
 	try {
-		const schedules = await Schedule.find({ isActive: { $ne: false } }).populate("route").select("route");
-		const options = routeSegmentService.buildSearchOptions(schedules);
+		const todayDateKey = getTodayDateKey();
+		const schedules = await Schedule.find({ isActive: { $ne: false }, date: { $gte: todayDateKey } })
+			.populate({ path: "bus", match: { isActive: true }, select: "_id" })
+			.populate("route")
+			.select("route bus date");
+		const options = routeSegmentService.buildSearchOptions(schedules.filter((schedule) => Boolean(schedule?.bus)));
 		return res.json(options);
 	} catch (e) {
 		return res.status(500).json({ message: e.message });
@@ -479,7 +536,7 @@ exports.getOperatorSchedules = async (req, res) => {
 			return res.status(401).json({ message: "Unauthorized" });
 		}
 
-		const busDocs = await Bus.find({ operator: operatorId }).select("_id").lean();
+		const busDocs = await Bus.find({ operator: operatorId, isActive: true }).select("_id").lean();
 		const busIds = busDocs.map((bus) => bus._id);
 		if (busIds.length === 0) {
 			return res.json([]);
@@ -548,7 +605,7 @@ exports.createOperatorSchedule = async (req, res) => {
 		}
 
 		const [bus, route] = await Promise.all([
-			Bus.findOne({ _id: busId, operator: operatorId }),
+			Bus.findOne({ _id: busId, operator: operatorId, isActive: true }),
 			Route.findById(routeId).lean(),
 		]);
 
@@ -776,6 +833,46 @@ exports.getSeatStatus = async (req, res) => {
 		const scheduleId = req.params.id;
 		const schedule = await Schedule.findById(scheduleId).populate("bus").populate("route");
 		if (!schedule) return res.status(404).json({ message: "Schedule not found" });
+		if (schedule?.isActive === false) {
+			return res.status(400).json({ message: "Schedule is no longer active" });
+		}
+		if (!schedule?.bus || schedule?.bus?.isActive === false) {
+			return res.status(400).json({ message: "Selected bus is no longer available" });
+		}
+
+		const todayStartMs = getTodayStartDate().getTime();
+		if (isPastScheduleDate(schedule?.date, todayStartMs)) {
+			return res.status(400).json({ message: "Cannot access past schedules" });
+		}
+
+		const routeDoc = schedule?.route?.toObject ? schedule.route.toObject() : schedule?.route;
+		const routeLanePoints = getRoutePointLanes(routeDoc || {});
+		const scheduleNeedsLaneRepair = laneCoverageMissing({
+			schedulePoints: schedule?.boardingPoints,
+			routeLanePoints: routeLanePoints?.boardingPoints,
+		}) || laneCoverageMissing({
+			schedulePoints: schedule?.droppingPoints,
+			routeLanePoints: routeLanePoints?.droppingPoints,
+		});
+
+		if (scheduleNeedsLaneRepair && routeDoc) {
+			const computedPoints = buildSchedulePointsFromRoute({
+				route: routeDoc,
+				date: normalizeText(schedule?.date),
+				time: normalizeText(schedule?.time),
+				arrivalDate: normalizeText(schedule?.arrivalDate || schedule?.date),
+				arrivalTime: normalizeText(schedule?.arrivalTime),
+			});
+
+			if (computedPoints.ok) {
+				schedule.boardingPoints = computedPoints.boardingPoints;
+				schedule.droppingPoints = computedPoints.droppingPoints;
+				schedule.arrivalDate = computedPoints.arrivalDate;
+				schedule.arrivalTime = computedPoints.arrivalTime;
+				schedule.durationMinutes = computedPoints.durationMinutes;
+				await schedule.save();
+			}
+		}
 
 		const fallbackSeatPrice = toFinitePrice(schedule?.price, DEFAULT_SEAT_PRICE);
 		const { seatLayout, seatCatalog, totalSeats } = buildSeatLayoutFromBus(schedule.bus, fallbackSeatPrice);
@@ -812,6 +909,7 @@ exports.getSeatStatus = async (req, res) => {
 			totalSeats,
 			bookedSeats,
 			lockedSeats,
+			lockDurationMs,
 			seatLayout,
 			seatPriceMap,
 		});

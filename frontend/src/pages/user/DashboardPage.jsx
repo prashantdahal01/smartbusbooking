@@ -15,7 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import BookingCard from "../../components/BookingCard";
 import { useAuth } from "../../context/AuthContext";
-import { getMyBookings } from "../../services/booking.service";
+import { getMyBookings, retryEsewaPayment } from "../../services/booking.service";
 import { getProfile, updateProfile } from "../../services/user.service";
 import { formatCurrency } from "../../utils/helpers";
 
@@ -51,6 +51,9 @@ export default function DashboardPage() {
 	const [bookings, setBookings] = useState([]);
 	const [loadingBookings, setLoadingBookings] = useState(false);
 	const [bookingError, setBookingError] = useState("");
+	const [bookingActionMessage, setBookingActionMessage] = useState(null);
+	const [retryingBookingId, setRetryingBookingId] = useState("");
+	const [bookingNowMs, setBookingNowMs] = useState(() => Date.now());
 
 	const [name, setName] = useState("");
 	const [phone, setPhone] = useState("");
@@ -105,6 +108,58 @@ export default function DashboardPage() {
 		// eslint-disable-next-line no-void
 		void loadBookings();
 	}, [activeView]);
+
+	useEffect(() => {
+		if (activeView !== "bookings") return undefined;
+		const timer = window.setInterval(() => {
+			setBookingNowMs(Date.now());
+		}, 1000);
+
+		return () => {
+			window.clearInterval(timer);
+		};
+	}, [activeView]);
+
+	const submitEsewaForm = (formUrl, fields) => {
+		if (!formUrl || !fields || typeof fields !== "object") {
+			throw new Error("Payment gateway response missing form details");
+		}
+
+		const form = document.createElement("form");
+		form.method = "POST";
+		form.action = String(formUrl);
+
+		Object.entries(fields).forEach(([name, value]) => {
+			const input = document.createElement("input");
+			input.type = "hidden";
+			input.name = String(name);
+			input.value = String(value);
+			form.appendChild(input);
+		});
+
+		document.body.appendChild(form);
+		form.submit();
+	};
+
+	const onRetryPayment = async (bookingId) => {
+		if (!bookingId || retryingBookingId) return;
+
+		setRetryingBookingId(String(bookingId));
+		setBookingActionMessage(null);
+
+		try {
+			const payment = await retryEsewaPayment({ bookingId });
+			setBookingActionMessage({ type: "success", text: "Redirecting to payment gateway..." });
+			submitEsewaForm(payment.formUrl, payment.fields);
+		} catch (err) {
+			const message = err?.response?.data?.message || err?.message || "Unable to retry payment";
+			setBookingActionMessage({ type: "error", text: message });
+			// eslint-disable-next-line no-void
+			void loadBookings();
+		} finally {
+			setRetryingBookingId("");
+		}
+	};
 
 	const loadProfile = async () => {
 		setProfileLoading(true);
@@ -256,6 +311,18 @@ export default function DashboardPage() {
 						<div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{bookingError}</div>
 					) : null}
 
+					{bookingActionMessage ? (
+						<div
+							className={`rounded-xl px-4 py-3 text-sm ${
+								bookingActionMessage.type === "success"
+									? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+									: "border border-rose-200 bg-rose-50 text-rose-700"
+							}`}
+						>
+							{bookingActionMessage.text}
+						</div>
+					) : null}
+
 					{loadingBookings ? (
 						<div className="grid gap-4">
 							<div className="skeleton h-44 rounded-2xl" />
@@ -264,7 +331,13 @@ export default function DashboardPage() {
 					) : (
 						<div className="grid gap-4">
 							{bookings.map((booking) => (
-								<BookingCard key={booking._id} booking={booking} />
+								<BookingCard
+									key={booking._id}
+									booking={booking}
+									nowMs={bookingNowMs}
+									onRetryPayment={onRetryPayment}
+									retrying={retryingBookingId === String(booking?._id || "")}
+								/>
 							))}
 						</div>
 					)}

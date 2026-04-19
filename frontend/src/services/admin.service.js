@@ -106,6 +106,11 @@ export async function deleteRoute(id) {
 	return res.data;
 }
 
+export async function syncRoutePoints(id) {
+	const res = await axiosInstance.post(`/routes/${id}/sync-points`);
+	return res.data;
+}
+
 export async function createSchedule(data) {
 	const res = await axiosInstance.post("/admin/schedule", data);
 	return res.data;

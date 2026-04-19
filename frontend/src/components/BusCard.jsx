@@ -1,12 +1,12 @@
 // Card component displaying bus details (name, type, departure time, fare, seats)
 // Used in search results listing
 import { Link } from "react-router-dom";
-import { formatCurrency, toAbsoluteAssetUrl } from "../utils/helpers";
+import { formatCurrency, getBusImageUrl } from "../utils/helpers";
 import { getBusTypeSummary } from "../utils/busTypeUtils";
 
 export default function BusCard({ schedule }) {
 	if (!schedule) return null;
-	const img = schedule.bus?.imageUrl ? toAbsoluteAssetUrl(schedule.bus.imageUrl) : "";
+	const img = getBusImageUrl(schedule?.bus, "bus");
 	const title = schedule.bus?.name || "Bus";
 	return (
 		<div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">

@@ -10,6 +10,35 @@ const normalizeStopType = (value) => {
   return "pickup";
 };
 
+const normalizeRouteLanePoints = (points) => {
+  const ordered = (Array.isArray(points) ? points : [])
+    .map((point, index) => {
+      const name = String(point?.name || "").trim();
+      const key = normalizeKey(name);
+      const orderRaw = Number(point?.order);
+      const order = Number.isFinite(orderRaw) && Number.isInteger(orderRaw) && orderRaw > 0 ? orderRaw : index + 1;
+      return {
+        name,
+        key,
+        order,
+        sequence: index,
+      };
+    })
+    .filter((point) => point.name && point.key)
+    .sort((a, b) => a.order - b.order || a.sequence - b.sequence || a.name.localeCompare(b.name));
+
+  const seen = new Set();
+  const unique = [];
+
+  ordered.forEach((point) => {
+    if (seen.has(point.key)) return;
+    seen.add(point.key);
+    unique.push(point);
+  });
+
+  return unique;
+};
+
 export default function RouteDetailPanel({
   route,
   loadingStops = false,
@@ -35,13 +64,20 @@ export default function RouteDetailPanel({
       })
       .filter((stop) => stop.name && stop.key);
 
-    const pickups = rows
+    const derivedPickups = rows
       .filter((stop) => stop.type === "pickup" || stop.type === "both")
       .sort((a, b) => a.order - b.order || a.sequence - b.sequence || a.name.localeCompare(b.name));
 
-    const dropoffs = rows
+    const derivedDropoffs = rows
       .filter((stop) => stop.type === "drop" || stop.type === "both")
       .sort((a, b) => a.order - b.order || a.sequence - b.sequence || a.name.localeCompare(b.name));
+
+    const lanePickups = normalizeRouteLanePoints(route?.boardingPoints);
+    const laneDropoffs = normalizeRouteLanePoints(route?.droppingPoints);
+    const hasLaneData = lanePickups.length > 0 || laneDropoffs.length > 0;
+
+    const pickups = hasLaneData ? lanePickups : derivedPickups;
+    const dropoffs = hasLaneData ? laneDropoffs : derivedDropoffs;
 
     const pathStops = [];
     const seen = new Set();
@@ -76,7 +112,7 @@ export default function RouteDetailPanel({
       pickupPathText: pickups.map((stop) => stop.name).join(" -> "),
       dropPathText: dropoffs.map((stop) => stop.name).join(" -> "),
     };
-  }, [route?.destination, route?.source, stops]);
+  }, [route?.boardingPoints, route?.destination, route?.droppingPoints, route?.source, stops]);
 
   if (!route) {
     return (

@@ -12,7 +12,7 @@ const {
 
 const LOCK_TTL_MS = (() => {
   const raw = Number(process.env.SEAT_LOCK_TTL_MS);
-  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 5 * 60 * 1000;
+  return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 10 * 60 * 1000;
 })();
 
 class SeatLockError extends Error {

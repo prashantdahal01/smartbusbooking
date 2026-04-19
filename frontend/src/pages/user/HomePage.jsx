@@ -17,10 +17,11 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import DatePicker from "../../components/search/DatePicker";
 import LocationAutocompleteInput from "../../components/search/LocationAutocompleteInput";
 import { getPopularRoutes, searchSchedules } from "../../services/booking.service";
 import { getBusTypeLabels } from "../../utils/busTypeUtils";
-import { formatCurrency, toAbsoluteAssetUrl } from "../../utils/helpers";
+import { formatCurrency, getBusImageUrl } from "../../utils/helpers";
 
 const ROUTE_CARD_TONES = [
 	"from-orange-500 to-amber-500",
@@ -237,7 +238,7 @@ export default function HomePage() {
 			const key = buildRouteKey(schedule?.route?.source, schedule?.route?.destination);
 			if (!key || map.has(key)) return;
 
-			const image = toAbsoluteAssetUrl(schedule?.bus?.imageUrl);
+			const image = getBusImageUrl(schedule?.bus, "bus");
 			if (!image) return;
 
 			map.set(key, image);
@@ -415,16 +416,13 @@ export default function HomePage() {
 							</div>
 
 							<div>
-								<label htmlFor="home-date" className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+								<span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
 									Travel Date
-								</label>
-								<input
-									id="home-date"
-									type="date"
-									min={todayDate}
+								</span>
+								<DatePicker
 									value={date}
-									onChange={(event) => setDate(event.target.value)}
-									className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-900 outline-none transition focus:border-orange-300 focus:bg-white focus:ring-2 focus:ring-orange-100"
+									onChange={setDate}
+									minDate={todayDate}
 								/>
 							</div>
 
@@ -567,7 +565,7 @@ export default function HomePage() {
 						<div className="mt-7 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
 							{featuredSchedules.length > 0 ? (
 								featuredSchedules.map((schedule) => {
-									const busImage = toAbsoluteAssetUrl(schedule?.bus?.imageUrl);
+									const busImage = getBusImageUrl(schedule?.bus, "bus");
 									const title = String(schedule?.bus?.name || "Bus Service").trim();
 									const sourceLabel = String(schedule?.route?.source || "").trim();
 									const destinationLabel = String(schedule?.route?.destination || "").trim();

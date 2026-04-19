@@ -16,6 +16,9 @@ router.get("/popular", routeController.listPopularRoutes);
 // POST /api/routes (admin)
 router.post("/", verifyToken, authorizeRoles("admin"), routeController.createRoute);
 
+// POST /api/routes/:id/sync-points (admin)
+router.post("/:id/sync-points", verifyToken, authorizeRoles("admin"), routeController.syncRoutePointLanes);
+
 // GET /api/routes/:id/stops
 router.get("/:id/stops", stopController.getStopsByRoute);
 

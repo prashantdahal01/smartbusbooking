@@ -3,6 +3,7 @@ const District = require("../models/District");
 const City = require("../models/City");
 const Route = require("../models/Route");
 const Stop = require("../models/Stop");
+const { syncRoutePoints, syncRoutePointsForIds } = require("../services/routePointSync.service");
 
 const normalizeKey = (value) => String(value || "").trim().toLowerCase();
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -113,177 +114,12 @@ const normalizeRouteLanePointOutput = (points) =>
 	}).filter((point) => point.name);
 
 const syncRouteMidStops = async (route) => {
-	if (!route) return;
-	const allStops = await getRouteStopsOrdered(route._id);
-	const sourceKey = normalizeKey(route.source);
-	const destinationKey = normalizeKey(route.destination);
-	const sourceDistrictKey = normalizeKey(route.sourceDistrict);
-	const destinationDistrictKey = normalizeKey(route.destinationDistrict);
-	const existingMidMetaByKey = new Map();
-	const existingLaneTimeByKey = new Map();
-
-	for (const lanePoint of [
-		...(Array.isArray(route.boardingPoints) ? route.boardingPoints : []),
-		...(Array.isArray(route.droppingPoints) ? route.droppingPoints : []),
-	]) {
-		const pointName = String(lanePoint?.name || "").trim();
-		const key = normalizeKey(pointName);
-		if (!pointName || !key) continue;
-		if (existingLaneTimeByKey.has(key)) continue;
-		const pointTime = String(lanePoint?.time || "").trim();
-		if (isValidTimeHHmm(pointTime)) {
-			existingLaneTimeByKey.set(key, pointTime);
-		}
-	}
-
-	for (const rawStop of Array.isArray(route.stops) ? route.stops : []) {
-		const name = String(rawStop?.name || "").trim();
-		const cityKey = normalizeKey(name);
-		if (!name || !cityKey) continue;
-
-		const kmRaw = toStopKmFromSource(rawStop);
-		const km = kmRaw !== undefined && kmRaw !== null && kmRaw !== "" ? Number(kmRaw) : undefined;
-		const orderRaw = Number(rawStop?.order);
-
-		existingMidMetaByKey.set(cityKey, {
-			kmFromSource: Number.isFinite(km) && km > 0 ? km : undefined,
-			order: Number.isFinite(orderRaw) && Number.isInteger(orderRaw) && orderRaw > 0 ? orderRaw : undefined,
-		});
-	}
-
-	const seen = new Set();
-	const mids = [];
-	const boardingByKey = new Map();
-	const droppingByKey = new Map();
-
-	const resolvePointTime = (name, absoluteTime) => {
-		const abs = String(absoluteTime || "").trim();
-		if (isValidTimeHHmm(abs)) return abs;
-		const key = normalizeKey(name);
-		const existing = existingLaneTimeByKey.get(key);
-		if (isValidTimeHHmm(existing)) return existing;
-		return "00:00";
-	};
-
-	const upsertLanePoint = (laneMap, point) => {
-		const name = String(point?.name || "").trim();
-		const key = normalizeKey(name);
-		if (!name || !key) return;
-
-		const nextOrderRaw = Number(point?.order);
-		const nextOrder = Number.isFinite(nextOrderRaw) && nextOrderRaw > 0 ? Math.trunc(nextOrderRaw) : undefined;
-		const nextTime = resolvePointTime(name, point?.time);
-
-		if (!laneMap.has(key)) {
-			laneMap.set(key, {
-				name,
-				order: nextOrder,
-				time: nextTime,
-			});
-			return;
-		}
-
-		const existing = laneMap.get(key);
-		if (Number.isFinite(nextOrder) && (!Number.isFinite(existing.order) || nextOrder < existing.order)) {
-			existing.order = nextOrder;
-		}
-		if ((!isValidTimeHHmm(existing.time) || existing.time === "00:00") && isValidTimeHHmm(nextTime)) {
-			existing.time = nextTime;
-		}
-	};
-
-	if (route.source) {
-		upsertLanePoint(boardingByKey, {
-			name: route.source,
-			order: 1,
-			time: existingLaneTimeByKey.get(sourceKey),
-		});
-	}
-	for (const stop of allStops) {
-		const name = String(stop?.cityName || "").trim();
-		const cityKey = normalizeKey(name);
-		if (!name || !cityKey) continue;
-		if (cityKey === sourceKey || cityKey === destinationKey) continue;
-		if (seen.has(cityKey)) continue;
-		seen.add(cityKey);
-
-		const persistedOrder = Number(stop?.order);
-		const prior = existingMidMetaByKey.get(cityKey);
-		const order =
-			Number.isFinite(persistedOrder) && Number.isInteger(persistedOrder) && persistedOrder > 0
-				? persistedOrder
-				: Number(prior?.order) || mids.length + 1;
-
-		const nextStop = {
-			name,
-			order,
-		};
-
-		if (Number.isFinite(prior?.kmFromSource)) {
-			nextStop.kmFromSource = prior.kmFromSource;
-		}
-
-		mids.push(nextStop);
-
-		const stopDistrictKey = normalizeKey(stop?.districtKey || stop?.district);
-		const stopType = normalizeStopType(stop?.type);
-		const belongsToSourceLane = sourceDistrictKey ? stopDistrictKey === sourceDistrictKey : stopTypeUsesPickupLane(stopType);
-		const belongsToDestinationLane = destinationDistrictKey
-			? stopDistrictKey === destinationDistrictKey
-			: stopTypeUsesDropLane(stopType);
-
-		if (belongsToSourceLane && stopTypeUsesPickupLane(stopType)) {
-			upsertLanePoint(boardingByKey, {
-				name,
-				order,
-				time: stop?.absoluteTime,
-			});
-		}
-		if (belongsToDestinationLane && stopTypeUsesDropLane(stopType)) {
-			upsertLanePoint(droppingByKey, {
-				name,
-				order,
-				time: stop?.absoluteTime,
-			});
-		}
-	}
-
-	const droppingTailOrder = Array.from(droppingByKey.values()).reduce((max, point) => {
-		const order = Number(point?.order);
-		if (!Number.isFinite(order) || order <= 0) return max;
-		return Math.max(max, order);
-	}, 0);
-
-	if (route.destination) {
-		upsertLanePoint(droppingByKey, {
-			name: route.destination,
-			order: droppingTailOrder > 0 ? droppingTailOrder + 1 : 1,
-			time: existingLaneTimeByKey.get(destinationKey),
-		});
-	}
-
-	const boardingPoints = normalizeRouteLanePointOutput(Array.from(boardingByKey.values()));
-	const droppingPoints = normalizeRouteLanePointOutput(Array.from(droppingByKey.values()));
-
-	await Route.findByIdAndUpdate(route._id, {
-		$set: {
-			stops: mids,
-			boardingPoints,
-			droppingPoints,
-		},
-	});
+	if (!route?._id) return;
+	await syncRoutePoints(route._id);
 };
 
 const syncRouteMidStopsForIds = async (routeIds) => {
-	const uniqueIds = Array.from(new Set((routeIds || []).map((id) => String(id)).filter(Boolean)));
-	for (const routeId of uniqueIds) {
-		if (!mongoose.isValidObjectId(routeId)) continue;
-		const route = await Route.findById(routeId)
-			.select("_id source destination sourceDistrict destinationDistrict stops boardingPoints droppingPoints")
-			.lean();
-		if (!route) continue;
-		await syncRouteMidStops(route);
-	}
+	await syncRoutePointsForIds(routeIds);
 };
 
 const resolveCityConflictMessage = (existingCity) => {

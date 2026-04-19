@@ -1,4 +1,6 @@
 // Handles admin-level operations: managing users, buses, routes, and schedules
+const fs = require("fs");
+const path = require("path");
 const mongoose = require("mongoose");
 const Bus = require("../models/Bus");
 const City = require("../models/City");
@@ -26,7 +28,7 @@ const rangeDaysByKey = {
   "3m": 90,
   "1y": 365,
 };
-const bookingAnalyticsStatusMatch = { status: { $nin: ["cancelled", "payment_failed"] } };
+const bookingAnalyticsStatusMatch = { status: "confirmed" };
 const userRoleSet = new Set(["admin", "operator", "customer"]);
 
 const toSafeText = (value) => String(value ?? "").trim();
@@ -55,9 +57,250 @@ const legacyTypeToBusCategory = {
   nonac: "NON_AC_SEATER",
 };
 const DEPRECATED_SCHEDULE_PRICE_FIELDS = ["price", "priceMin", "priceMax"];
+const BUS_IMAGE_TYPES = ["bus", "seatLayout", "sleeperLayout"];
+const BUS_UPLOAD_PUBLIC_PREFIX = "/uploads/buses/";
+const busUploadsDir = path.join(__dirname, "..", "uploads", "buses");
 
 const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
 const normalizeBusTypeValue = (value) => String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+const hasOwnProp = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+const normalizeImagePath = (value) => String(value || "").trim();
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+
+const looksLikeEmail = (value) => EMAIL_RE.test(String(value || "").trim());
+const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
+
+const parseOperatorAssignmentInput = (body = {}) => {
+  const hasOperatorEmail = hasOwnProp(body, "operatorEmail");
+  const hasOperator = hasOwnProp(body, "operator");
+  if (!hasOperatorEmail && !hasOperator) return { hasInput: false };
+
+  const emailInput = toSafeText(body.operatorEmail);
+  const operatorInput = toSafeText(body.operator);
+  const token = emailInput || operatorInput;
+
+  if (!token) {
+    return {
+      hasInput: true,
+      clear: true,
+      token: "",
+    };
+  }
+
+  return {
+    hasInput: true,
+    clear: false,
+    token,
+  };
+};
+
+const resolveOperatorAssignment = async (body = {}) => {
+  const parsed = parseOperatorAssignmentInput(body);
+  if (!parsed.hasInput) {
+    return {
+      hasInput: false,
+      clear: false,
+      operatorId: undefined,
+    };
+  }
+
+  if (parsed.clear) {
+    return {
+      hasInput: true,
+      clear: true,
+      operatorId: undefined,
+    };
+  }
+
+  const token = toSafeText(parsed.token);
+  const byEmail = looksLikeEmail(token);
+  const byObjectId = mongoose.isValidObjectId(token);
+
+  if (!byEmail && !byObjectId) {
+    return {
+      hasInput: true,
+      error: "Operator must be provided as a valid operator email address.",
+    };
+  }
+
+  const query = byEmail
+    ? { email: normalizeEmail(token), role: "operator", isActive: true }
+    : { _id: token, role: "operator", isActive: true };
+
+  const operatorUser = await User.findOne(query).select("_id email").lean();
+  if (!operatorUser) {
+    return {
+      hasInput: true,
+      error: byEmail
+        ? `No active operator account found for email "${token}"`
+        : "Operator id is invalid or does not belong to an active operator",
+    };
+  }
+
+  return {
+    hasInput: true,
+    clear: false,
+    operatorId: operatorUser._id,
+  };
+};
+
+const normalizeBusImageType = (value) => {
+  const token = String(value || "").trim().toLowerCase().replace(/[\s_]+/g, "-");
+  if (!token) return "";
+  if (["bus", "main", "image", "exterior"].includes(token)) return "bus";
+  if (["seat", "seat-layout", "seatlayout", "layout"].includes(token)) return "seatLayout";
+  if (["sleeper", "sleeper-layout", "sleeperlayout"].includes(token)) return "sleeperLayout";
+  return "";
+};
+
+const toBusImagesObject = (rawImages) => {
+  const source = rawImages && typeof rawImages === "object" && !Array.isArray(rawImages) ? rawImages : {};
+  return {
+    bus: normalizeImagePath(source.bus),
+    seatLayout: normalizeImagePath(source.seatLayout),
+    sleeperLayout: normalizeImagePath(source.sleeperLayout),
+  };
+};
+
+const parseBooleanFlag = (value) => {
+  if (typeof value === "boolean") return value;
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on";
+};
+
+const parseBusImageRemoveFlags = (body = {}) => ({
+  bus: parseBooleanFlag(body.removeBusImage),
+  seatLayout: parseBooleanFlag(body.removeSeatLayoutImage),
+  sleeperLayout: parseBooleanFlag(body.removeSleeperLayoutImage),
+});
+
+const parseBusImagesPatchFromBody = (body = {}) => {
+  const patch = {};
+
+  let nestedImages = body.images;
+  if (typeof nestedImages === "string") {
+    const trimmed = nestedImages.trim();
+    if (!trimmed) nestedImages = null;
+    else {
+      try {
+        nestedImages = JSON.parse(trimmed);
+      } catch {
+        nestedImages = null;
+      }
+    }
+  }
+
+  if (nestedImages && typeof nestedImages === "object" && !Array.isArray(nestedImages)) {
+    if (hasOwnProp(nestedImages, "bus")) patch.bus = normalizeImagePath(nestedImages.bus);
+    if (hasOwnProp(nestedImages, "seatLayout")) patch.seatLayout = normalizeImagePath(nestedImages.seatLayout);
+    if (hasOwnProp(nestedImages, "sleeperLayout")) patch.sleeperLayout = normalizeImagePath(nestedImages.sleeperLayout);
+  }
+
+  if (Array.isArray(nestedImages)) {
+    nestedImages.forEach((entry) => {
+      const type = normalizeBusImageType(entry?.type);
+      if (!type) return;
+      patch[type] = normalizeImagePath(entry?.url);
+    });
+  }
+
+  if (hasOwnProp(body, "imageUrl")) patch.bus = normalizeImagePath(body.imageUrl);
+  if (hasOwnProp(body, "busImageUrl")) patch.bus = normalizeImagePath(body.busImageUrl);
+  if (hasOwnProp(body, "seatLayoutImageUrl")) patch.seatLayout = normalizeImagePath(body.seatLayoutImageUrl);
+  if (hasOwnProp(body, "sleeperLayoutImageUrl")) patch.sleeperLayout = normalizeImagePath(body.sleeperLayoutImageUrl);
+
+  return patch;
+};
+
+const firstUploadedFile = (files, fieldName) => {
+  const items = files && files[fieldName];
+  if (!Array.isArray(items) || items.length === 0) return null;
+  return items[0] || null;
+};
+
+const toBusImagePublicPath = (file) => {
+  const filename = normalizeImagePath(file?.filename);
+  if (!filename) return "";
+  return `${BUS_UPLOAD_PUBLIC_PREFIX}${filename}`;
+};
+
+const extractUploadedBusImagePaths = (files = {}) => ({
+  bus: toBusImagePublicPath(firstUploadedFile(files, "busImage") || firstUploadedFile(files, "image")),
+  seatLayout: toBusImagePublicPath(firstUploadedFile(files, "seatLayoutImage")),
+  sleeperLayout: toBusImagePublicPath(firstUploadedFile(files, "sleeperLayoutImage")),
+});
+
+const mergeBusImages = ({ baseImages, body = {}, uploadedImages = {}, removeFlags = {} }) => {
+  const next = toBusImagesObject(baseImages);
+  const bodyPatch = parseBusImagesPatchFromBody(body);
+
+  BUS_IMAGE_TYPES.forEach((type) => {
+    if (hasOwnProp(bodyPatch, type)) {
+      next[type] = normalizeImagePath(bodyPatch[type]);
+    }
+  });
+
+  BUS_IMAGE_TYPES.forEach((type) => {
+    if (removeFlags[type]) {
+      next[type] = "";
+    }
+  });
+
+  BUS_IMAGE_TYPES.forEach((type) => {
+    const uploadedPath = normalizeImagePath(uploadedImages[type]);
+    if (uploadedPath) {
+      next[type] = uploadedPath;
+    }
+  });
+
+  return toBusImagesObject(next);
+};
+
+const withBusImageCompatibility = (busDoc) => {
+  if (!busDoc) return busDoc;
+  const bus = busDoc?.toObject ? busDoc.toObject() : { ...busDoc };
+  const images = toBusImagesObject(bus?.images);
+
+  if (!images.bus) {
+    images.bus = normalizeImagePath(bus?.imageUrl);
+  }
+
+  bus.images = images;
+  bus.imageUrl = images.bus || undefined;
+  return bus;
+};
+
+const resolveBusImageAbsolutePath = (publicPath) => {
+  const safePath = normalizeImagePath(publicPath);
+  if (!safePath || !safePath.startsWith(BUS_UPLOAD_PUBLIC_PREFIX)) return "";
+
+  const filename = path.basename(safePath);
+  if (!filename) return "";
+  return path.join(busUploadsDir, filename);
+};
+
+const safeDeleteBusImageByPath = async (publicPath) => {
+  const absolutePath = resolveBusImageAbsolutePath(publicPath);
+  if (!absolutePath) return;
+
+  try {
+    await fs.promises.unlink(absolutePath);
+  } catch {
+    // ignore cleanup failures
+  }
+};
+
+const cleanupReplacedBusImages = async ({ previousImages, nextImages }) => {
+  const previous = toBusImagesObject(previousImages);
+  const next = toBusImagesObject(nextImages);
+
+  const deletions = BUS_IMAGE_TYPES
+    .filter((type) => previous[type] && previous[type] !== next[type])
+    .map((type) => safeDeleteBusImageByPath(previous[type]));
+
+  await Promise.all(deletions);
+};
+
 const normalizeSeatType = (value) => {
   const normalized = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
   if (normalized === "SLEEPER") return "SLEEPER";
@@ -301,6 +544,15 @@ const parseRangeWindow = (rangeValue) => {
   startDate.setDate(startDate.getDate() - (days - 1));
 
   return { normalizedRange, startDate, endDate };
+};
+
+const getTodayDateKey = () => {
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 };
 
 const buildCreatedAtMatch = ({ startDate, endDate }) => ({
@@ -608,8 +860,13 @@ const withSchedulePointCompatibility = (scheduleDoc) => {
 // BUS
 exports.createBus = async (req, res) => {
   try {
-    const { name, type, operator, vehicleNumber } = req.body || {};
+    const { name, type, vehicleNumber } = req.body || {};
     const busPhone = toSafeText(req.body?.phone || req.body?.busPhone || req.body?.contactNumber);
+    const operatorResolution = await resolveOperatorAssignment(req.body || {});
+    if (operatorResolution.error) {
+      return res.status(400).json({ message: operatorResolution.error });
+    }
+
     const busTypeParse = parseBusTypesInput(req.body?.busTypes, req.body?.busCategory || type);
     if (busTypeParse.ok === false) {
       return res.status(400).json({ message: busTypeParse.message || "Invalid busTypes payload" });
@@ -640,7 +897,14 @@ exports.createBus = async (req, res) => {
       return res.status(400).json({ message: "At least one seat must be configured via decks" });
     }
 
-    const imageUrl = req.file ? `/uploads/buses/${req.file.filename}` : req.body?.imageUrl;
+    const uploadedImages = extractUploadedBusImagePaths(req.files || {});
+    const images = mergeBusImages({
+      baseImages: { bus: req.body?.imageUrl },
+      body: req.body || {},
+      uploadedImages,
+      removeFlags: {},
+    });
+
     const { hasInput: hasPolicyInput, policies } = extractBusPolicies(req.body || {});
 
     const bus = await Bus.create({
@@ -652,30 +916,46 @@ exports.createBus = async (req, res) => {
       phone: busPhone || undefined,
       totalSeats,
       decks: deckParse.hasInput && deckParse.ok ? deckParse.value : undefined,
-      operator: toSafeText(operator) || undefined,
-      imageUrl: imageUrl || undefined,
+      operator: operatorResolution.operatorId,
+      images,
+      imageUrl: images.bus || undefined,
       policies: hasPolicyInput ? policies : undefined,
     });
-    res.status(201).json(bus);
+    res.status(201).json(withBusImageCompatibility(bus));
   } catch (e) {
     res.status(500).json({ message: e.message });
   }
 };
 
 exports.getBuses = async (req, res) => {
-  const buses = await Bus.find().populate("operator");
-  res.json(buses);
+  const buses = await Bus.find({ isActive: true }).populate("operator");
+  res.json(buses.map((bus) => withBusImageCompatibility(bus)));
 };
 
 exports.updateBus = async (req, res) => {
   try {
     const updates = { ...req.body };
+    const uploadedImages = extractUploadedBusImagePaths(req.files || {});
+    const imageRemoveFlags = parseBusImageRemoveFlags(req.body || {});
+
     const hasBusPhoneInput = req.body?.phone !== undefined || req.body?.busPhone !== undefined || req.body?.contactNumber !== undefined;
     if (hasBusPhoneInput) {
       updates.phone = toSafeText(req.body?.phone || req.body?.busPhone || req.body?.contactNumber) || undefined;
     }
+
     delete updates.busPhone;
     delete updates.contactNumber;
+    delete updates.imageUrl;
+    delete updates.images;
+    delete updates.busImageUrl;
+    delete updates.seatLayoutImageUrl;
+    delete updates.sleeperLayoutImageUrl;
+    delete updates.operator;
+    delete updates.operatorEmail;
+    delete updates.removeBusImage;
+    delete updates.removeSeatLayoutImage;
+    delete updates.removeSleeperLayoutImage;
+
     const { hasInput: hasPolicyInput, policies: policyPatch } = extractBusPolicies(req.body || {});
     const hasBusTypesInput = Object.prototype.hasOwnProperty.call(updates, "busTypes");
 
@@ -723,19 +1003,37 @@ exports.updateBus = async (req, res) => {
       }
     }
 
-    if (req.file) {
-      updates.imageUrl = `/uploads/buses/${req.file.filename}`;
-    }
-
-    if (updates.operator === "") updates.operator = undefined;
     if (updates.vehicleNumber === "") updates.vehicleNumber = undefined;
 
-    if (hasPolicyInput) {
-      const existingBus = await Bus.findById(req.params.id);
-      if (!existingBus) {
-        return res.status(404).json({ message: "Bus not found" });
-      }
+    const existingBus = await Bus.findById(req.params.id);
+    if (!existingBus) {
+      return res.status(404).json({ message: "Bus not found" });
+    }
 
+    const operatorResolution = await resolveOperatorAssignment(req.body || {});
+    if (operatorResolution.error) {
+      return res.status(400).json({ message: operatorResolution.error });
+    }
+    if (operatorResolution.hasInput) {
+      updates.operator = operatorResolution.operatorId;
+    }
+
+    const existingImages = {
+      ...(existingBus?.images && typeof existingBus.images === "object" ? existingBus.images : {}),
+      bus: normalizeImagePath(existingBus?.images?.bus || existingBus?.imageUrl),
+    };
+
+    const nextImages = mergeBusImages({
+      baseImages: existingImages,
+      body: req.body || {},
+      uploadedImages,
+      removeFlags: imageRemoveFlags,
+    });
+
+    updates.images = nextImages;
+    updates.imageUrl = nextImages.bus || undefined;
+
+    if (hasPolicyInput) {
       updates.policies = {
         refundPolicy: toSafeText(policyPatch.refundPolicy ?? existingBus?.policies?.refundPolicy),
         cancellationPolicy: toSafeText(policyPatch.cancellationPolicy ?? existingBus?.policies?.cancellationPolicy),
@@ -745,16 +1043,44 @@ exports.updateBus = async (req, res) => {
     }
 
     const bus = await Bus.findByIdAndUpdate(req.params.id, updates, { new: true });
-    if (!bus) return res.status(404).json({ message: "Bus not found" });
-    res.json(bus);
+    if (!bus) {
+      return res.status(404).json({ message: "Bus not found" });
+    }
+
+    await cleanupReplacedBusImages({
+      previousImages: existingImages,
+      nextImages,
+    });
+
+    res.json(withBusImageCompatibility(bus));
   } catch (e) {
     res.status(500).json({ message: e.message });
   }
 };
 
 exports.deleteBus = async (req, res) => {
-  await Bus.findByIdAndDelete(req.params.id);
-  res.json({ message: "Deleted" });
+  try {
+    const bus = await Bus.findById(req.params.id);
+    if (!bus) {
+      return res.status(404).json({ message: "Bus not found" });
+    }
+
+    if (bus.isActive === false) {
+      return res.json({ message: "Bus already deleted" });
+    }
+
+    bus.isActive = false;
+    await bus.save();
+
+    await Schedule.updateMany(
+      { bus: bus._id },
+      { $set: { isActive: false } }
+    );
+
+    res.json({ message: "Deleted" });
+  } catch (e) {
+    res.status(500).json({ message: e.message });
+  }
 };
 
 const sortRoutePoints = (points) =>
@@ -990,7 +1316,13 @@ exports.createRoute = async (req, res) => {
     ]);
 
     if (!sourceCity || !destinationCity || !sourceCity.district || !destinationCity.district) {
-      return res.status(400).json({ message: "source and destination must be valid cities with valid districts" });
+      const message = await buildInvalidRouteCityMessage({
+        sourceInput,
+        destinationInput,
+        sourceCity,
+        destinationCity,
+      });
+      return res.status(400).json({ message });
     }
     if (String(sourceCity._id) === String(destinationCity._id)) {
       return res.status(400).json({ message: "source and destination must be different cities" });
@@ -1082,7 +1414,13 @@ exports.updateRoute = async (req, res) => {
       resolveCityForRoute(destinationInput),
     ]);
     if (!sourceCity || !destinationCity || !sourceCity.district || !destinationCity.district) {
-      return res.status(400).json({ message: "source and destination must be valid cities with valid districts" });
+      const message = await buildInvalidRouteCityMessage({
+        sourceInput,
+        destinationInput,
+        sourceCity,
+        destinationCity,
+      });
+      return res.status(400).json({ message });
     }
 
     const nextSource = String(sourceCity.name || "").trim();
@@ -1226,9 +1564,15 @@ exports.createSchedule = async (req, res) => {
       return res.status(400).json({ message: "At least one dropping point is required" });
     }
 
-    const route = await Route.findById(body.route).lean();
+    const [route, bus] = await Promise.all([
+      Route.findById(body.route).lean(),
+      Bus.findOne({ _id: body.bus, isActive: true }).select("_id").lean(),
+    ]);
     if (!route) {
       return res.status(400).json({ message: "Route not found" });
+    }
+    if (!bus) {
+      return res.status(400).json({ message: "Bus not found or inactive" });
     }
     const routeWithLanes = withRoutePointCompatibility(route);
     const boardingIndexByKey = buildPointLaneIndexByKey(routeWithLanes.boardingPoints);
@@ -1256,6 +1600,11 @@ exports.createSchedule = async (req, res) => {
 exports.updateSchedule = async (req, res) => {
   try {
     const body = { ...req.body };
+    const existingSchedule = await Schedule.findById(req.params.id).select("route bus").lean();
+    if (!existingSchedule) {
+      return res.status(404).json({ message: "Schedule not found" });
+    }
+
     const deprecatedPriceFields = getProvidedDeprecatedSchedulePriceFields(body);
     if (deprecatedPriceFields.length > 0) {
       return res.status(400).json({
@@ -1286,10 +1635,22 @@ exports.updateSchedule = async (req, res) => {
       return res.status(400).json({ message: "At least one dropping point is required" });
     }
 
-    const route = await Route.findById(body.route).lean();
+    const routeId = body.route || existingSchedule.route;
+    const busId = body.bus || existingSchedule.bus;
+
+    const [route, bus] = await Promise.all([
+      Route.findById(routeId).lean(),
+      Bus.findOne({ _id: busId, isActive: true }).select("_id").lean(),
+    ]);
     if (!route) {
       return res.status(400).json({ message: "Route not found" });
     }
+    if (!bus) {
+      return res.status(400).json({ message: "Bus not found or inactive" });
+    }
+
+    body.route = routeId;
+    body.bus = busId;
     const routeWithLanes = withRoutePointCompatibility(route);
     const boardingIndexByKey = buildPointLaneIndexByKey(routeWithLanes.boardingPoints);
     const droppingIndexByKey = buildPointLaneIndexByKey(routeWithLanes.droppingPoints);
@@ -1315,12 +1676,14 @@ exports.updateSchedule = async (req, res) => {
 
 exports.getSchedules = async (req, res) => {
   try {
-    const schedules = await Schedule.find()
-      .populate("bus")
+    const todayDateKey = getTodayDateKey();
+    const schedules = await Schedule.find({ isActive: { $ne: false }, date: { $gte: todayDateKey } })
+      .populate({ path: "bus", match: { isActive: true } })
       .populate("route")
       .sort({ date: 1, time: 1 });
 
-    res.json(schedules.map((schedule) => withSchedulePointCompatibility(schedule)));
+    const visibleSchedules = schedules.filter((schedule) => Boolean(schedule?.bus));
+    res.json(visibleSchedules.map((schedule) => withSchedulePointCompatibility(schedule)));
   } catch (e) {
     res.status(500).json({ message: e.message });
   }
@@ -1450,25 +1813,43 @@ exports.getDashboardStats = async (req, res) => {
       ...bookingAnalyticsStatusMatch,
     };
 
-    const startDateString = rangeWindow.startDate.toISOString().slice(0, 10);
-    const endDateString = rangeWindow.endDate.toISOString().slice(0, 10);
-    const scheduleMatch = {
-      date: {
-        $gte: startDateString,
-        $lte: endDateString,
-      },
-    };
-
-    const [totalSchedules, busesInRange, routesInRange, totalUsers, totalBookings] = await Promise.all([
-      Schedule.countDocuments(scheduleMatch),
-      Schedule.distinct("bus", scheduleMatch),
-      Schedule.distinct("route", scheduleMatch),
+    const todayDateKey = getTodayDateKey();
+    const [totalBuses, scheduleSummaryRows, totalUsers, totalBookings] = await Promise.all([
+      Bus.countDocuments({ isActive: true }),
+      Schedule.aggregate([
+        {
+          $match: {
+            isActive: { $ne: false },
+            date: { $gte: todayDateKey },
+          },
+        },
+        {
+          $lookup: {
+            from: "buses",
+            localField: "bus",
+            foreignField: "_id",
+            as: "busDoc",
+          },
+        },
+        { $unwind: "$busDoc" },
+        { $match: { "busDoc.isActive": true } },
+        {
+          $group: {
+            _id: null,
+            totalSchedules: { $sum: 1 },
+            routeIds: { $addToSet: "$route" },
+          },
+        },
+      ]),
       countModelWithRange(User, rangeWindow),
       Booking.countDocuments(bookingMatch),
     ]);
 
-    const totalBuses = busesInRange.filter(Boolean).length;
-    const totalRoutes = routesInRange.filter(Boolean).length;
+    const scheduleSummary = scheduleSummaryRows[0] || {};
+    const totalSchedules = Number(scheduleSummary.totalSchedules) || 0;
+    const totalRoutes = Array.isArray(scheduleSummary.routeIds)
+      ? scheduleSummary.routeIds.filter(Boolean).length
+      : 0;
 
     res.json({
       totalBuses,
@@ -1697,7 +2078,10 @@ exports.getNotifications = async (req, res) => {
   try {
     const limit = parsePositiveInt(req.query?.limit, { defaultValue: 20, min: 1, max: 100 });
 
-    const totalSchedules = await Schedule.countDocuments({});
+    const totalSchedules = await Schedule.countDocuments({
+      isActive: { $ne: false },
+      date: { $gte: getTodayDateKey() },
+    });
     if (totalSchedules === 0) {
       const existingSystemAlert = await Notification.findOne({
         targetRole: "admin",
@@ -2009,6 +2393,124 @@ exports.cancelBookingByAdmin = async (req, res) => {
 
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const damerauLevenshteinDistance = (left, right) => {
+  const a = String(left || "");
+  const b = String(right || "");
+
+  if (!a) return b.length;
+  if (!b) return a.length;
+
+  const matrix = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
+
+  for (let i = 0; i <= a.length; i += 1) matrix[i][0] = i;
+  for (let j = 0; j <= b.length; j += 1) matrix[0][j] = j;
+
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let best = Math.min(
+        matrix[i - 1][j] + 1,
+        matrix[i][j - 1] + 1,
+        matrix[i - 1][j - 1] + cost
+      );
+
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        best = Math.min(best, matrix[i - 2][j - 2] + 1);
+      }
+
+      matrix[i][j] = best;
+    }
+  }
+
+  return matrix[a.length][b.length];
+};
+
+const getCityFuzzyThreshold = (inputKey) => {
+  if (!inputKey) return 0;
+  if (inputKey.length >= 8) return 2;
+  return 1;
+};
+
+const rankCityMatches = async (value) => {
+  const input = String(value || "").trim();
+  const inputKey = stopKey(input);
+  if (!input || !inputKey) return [];
+
+  const cities = await City.find({}).select("name key district").populate("district");
+
+  const ranked = [];
+  for (const city of cities) {
+    const cityKey = stopKey(city?.key || city?.name);
+    if (!cityKey) continue;
+
+    ranked.push({
+      city,
+      distance: damerauLevenshteinDistance(inputKey, cityKey),
+      lengthDelta: Math.abs(inputKey.length - cityKey.length),
+    });
+  }
+
+  ranked.sort((a, b) => {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    if (a.lengthDelta !== b.lengthDelta) return a.lengthDelta - b.lengthDelta;
+    return String(a.city?.name || "").localeCompare(String(b.city?.name || ""), undefined, {
+      sensitivity: "base",
+    });
+  });
+
+  return ranked;
+};
+
+const suggestCityNames = async (value, { limit = 3 } = {}) => {
+  const inputKey = stopKey(String(value || "").trim());
+  if (!inputKey) return [];
+
+  const ranked = await rankCityMatches(value);
+  const maxDistance = Math.max(2, getCityFuzzyThreshold(inputKey) + 1);
+
+  return ranked
+    .filter((item) => item.distance <= maxDistance)
+    .slice(0, limit)
+    .map((item) => String(item.city?.name || "").trim())
+    .filter(Boolean)
+    .filter((name, idx, arr) => arr.indexOf(name) === idx);
+};
+
+const buildInvalidRouteCityMessage = async ({ sourceInput, destinationInput, sourceCity, destinationCity }) => {
+  const [sourceSuggestions, destinationSuggestions] = await Promise.all([
+    sourceCity ? Promise.resolve([]) : suggestCityNames(sourceInput),
+    destinationCity ? Promise.resolve([]) : suggestCityNames(destinationInput),
+  ]);
+
+  const issues = [];
+
+  if (!sourceCity) {
+    const sourceLabel = String(sourceInput || "").trim() || "(empty)";
+    const suggestionText = sourceSuggestions.length > 0
+      ? ` Did you mean ${sourceSuggestions.join(", ")}?`
+      : "";
+    issues.push(`Source city \"${sourceLabel}\" was not found.${suggestionText}`);
+  } else if (!sourceCity.district) {
+    issues.push(`Source city \"${sourceCity.name}\" has no district assigned`);
+  }
+
+  if (!destinationCity) {
+    const destinationLabel = String(destinationInput || "").trim() || "(empty)";
+    const suggestionText = destinationSuggestions.length > 0
+      ? ` Did you mean ${destinationSuggestions.join(", ")}?`
+      : "";
+    issues.push(`Destination city \"${destinationLabel}\" was not found.${suggestionText}`);
+  } else if (!destinationCity.district) {
+    issues.push(`Destination city \"${destinationCity.name}\" has no district assigned`);
+  }
+
+  if (issues.length === 0) {
+    return "source and destination must be valid cities with valid districts";
+  }
+
+  return issues.join(" ");
+};
+
 const resolveCityForRoute = async (value) => {
   if (!value) return null;
 
@@ -2020,7 +2522,20 @@ const resolveCityForRoute = async (value) => {
   if (!cityName) return null;
   const cityKey = stopKey(cityName);
 
-  return City.findOne({
+  const exactMatch = await City.findOne({
     $or: [{ key: cityKey }, { name: { $regex: new RegExp(`^${escapeRegex(cityName)}$`, "i") } }],
   }).populate("district");
+
+  if (exactMatch) return exactMatch;
+
+  const ranked = await rankCityMatches(cityName);
+  const fuzzyThreshold = getCityFuzzyThreshold(cityKey);
+  const fuzzyCandidates = ranked.filter((item) => item.distance <= fuzzyThreshold);
+
+  if (fuzzyCandidates.length === 0) return null;
+  if (fuzzyCandidates.length > 1 && fuzzyCandidates[0].distance === fuzzyCandidates[1].distance) {
+    return null;
+  }
+
+  return fuzzyCandidates[0].city || null;
 };

@@ -2,10 +2,18 @@
 const Booking = require("../models/Booking");
 const Bus = require("../models/Bus");
 const Schedule = require("../models/Schedule");
+const SeatLock = require("../models/SeatLock");
 const { seatLockService } = require("../algorithms/seatLock");
 const { generateTicketPdfBuffer } = require("../utils/ticketPdf");
 const { createAdminNotification } = require("../services/notification.service");
 const { buildRouteOrderIndex } = require("../utils/routePoints");
+const {
+	BOOKING_STATUS,
+	PAYMENT_STATUS,
+	normalizeBookingDocument,
+	isPendingBooking,
+	isRetryablePendingBooking,
+} = require("../utils/bookingState");
 
 const DEFAULT_SEAT_PRICE = 0;
 
@@ -230,6 +238,117 @@ const parseIsoDateTimeMs = (date, time) => {
 	return new Date(`${d}T${t}:00`).getTime();
 };
 
+const parseDateStartMs = (date) => {
+	const safeDate = String(date || "").trim();
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) return NaN;
+	return new Date(`${safeDate}T00:00:00`).getTime();
+};
+
+const getTodayStartMs = () => {
+	const now = new Date();
+	now.setHours(0, 0, 0, 0);
+	return now.getTime();
+};
+
+const getBookingScheduleId = (booking) => booking?.schedule?._id || booking?.schedule;
+
+const toSeatLockKey = (scheduleId, seatLabel) => {
+	return `${String(scheduleId || "")}::${normalizeSeatLabel(seatLabel)}`;
+};
+
+const normalizeAndPersistBookingState = async (booking) => {
+	const normalized = normalizeBookingDocument(booking);
+	if (normalized.changed) {
+		await booking.save();
+	}
+	return normalized;
+};
+
+const buildActiveLockIndex = async ({ userId, scheduleIds }) => {
+	const safeScheduleIds = [...new Set((Array.isArray(scheduleIds) ? scheduleIds : []).map((id) => String(id || "").trim()).filter(Boolean))];
+	if (!userId || safeScheduleIds.length === 0) return new Map();
+
+	const activeLocks = await SeatLock.find({
+		userId,
+		scheduleId: { $in: safeScheduleIds },
+		status: "LOCKED",
+		expiresAt: { $gt: new Date() },
+	}).select("scheduleId seatNumber expiresAt");
+
+	const lockIndex = new Map();
+	activeLocks.forEach((lock) => {
+		const key = toSeatLockKey(lock?.scheduleId, lock?.seatNumber);
+		const expiresAtMs = new Date(lock?.expiresAt || 0).getTime();
+		if (!key || !Number.isFinite(expiresAtMs)) return;
+
+		const current = lockIndex.get(key);
+		if (!Number.isFinite(current) || expiresAtMs < current) {
+			lockIndex.set(key, expiresAtMs);
+		}
+	});
+
+	return lockIndex;
+};
+
+const resolveBookingLockWindow = (booking, lockIndex) => {
+	const scheduleId = getBookingScheduleId(booking);
+	const seats = Array.isArray(booking?.seats) ? booking.seats.map((seat) => normalizeSeatLabel(seat)).filter(Boolean) : [];
+	if (!scheduleId || seats.length === 0) {
+		return { hasAllLocks: false, expiresAtMs: NaN, seats: [] };
+	}
+
+	const expiries = [];
+	for (const seat of seats) {
+		const expiresAtMs = Number(lockIndex.get(toSeatLockKey(scheduleId, seat)));
+		if (!Number.isFinite(expiresAtMs)) {
+			return { hasAllLocks: false, expiresAtMs: NaN, seats };
+		}
+		expiries.push(expiresAtMs);
+	}
+
+	return {
+		hasAllLocks: true,
+		expiresAtMs: Math.min(...expiries),
+		seats,
+	};
+};
+
+const markPendingBookingExpired = async (booking) => {
+	booking.status = BOOKING_STATUS.CANCELLED;
+	booking.payment = booking.payment || { provider: "esewa" };
+	booking.payment.status = PAYMENT_STATUS.FAILED;
+	booking.payment.gatewayStatus = booking.payment.gatewayStatus || "LOCK_EXPIRED";
+	await booking.save();
+
+	await seatLockService.releaseLocks({
+		scheduleId: getBookingScheduleId(booking),
+		seats: booking?.seats,
+		allowEmptySeats: true,
+	}).catch(() => {});
+};
+
+const toClientBooking = ({ booking, bookingState, lockWindow, nowMs }) => {
+	const plain = booking?.toObject ? booking.toObject() : booking;
+	const payment = plain?.payment && typeof plain.payment === "object" ? plain.payment : {};
+
+	const lockExpiresAtMs = Number(lockWindow?.expiresAtMs);
+	const hasActiveLock = lockWindow?.hasAllLocks && Number.isFinite(lockExpiresAtMs) && lockExpiresAtMs > nowMs;
+	const retryEligible = hasActiveLock && isRetryablePendingBooking(bookingState || {});
+
+	return {
+		...plain,
+		status: bookingState?.bookingStatus || BOOKING_STATUS.PENDING,
+		payment: {
+			...payment,
+			status: bookingState?.paymentStatus || PAYMENT_STATUS.PENDING,
+		},
+		paymentStatus: bookingState?.paymentStatus || PAYMENT_STATUS.PENDING,
+		lockExpiresAt: hasActiveLock ? new Date(lockExpiresAtMs).toISOString() : null,
+		lockRemainingMs: hasActiveLock ? Math.max(0, lockExpiresAtMs - nowMs) : 0,
+		retryEligible,
+	};
+};
+
 exports.lockSeats = async (req, res) => {
 	try {
 		const { scheduleId, seats, sessionId } = req.body;
@@ -247,6 +366,7 @@ exports.lockSeats = async (req, res) => {
 			lockedSeats: lockResult.seats,
 			failedSeats: [],
 			expiresAt: lockResult.expiresAt,
+			lockDurationMs: lockResult.lockDurationMs,
 		});
 	} catch (e) {
 		const formatted = seatLockService.formatError(e);
@@ -315,6 +435,20 @@ exports.createBooking = async (req, res) => {
 		if (!schedule) return res.status(404).json({ message: "Schedule not found" });
 		if (!schedule.route) return res.status(400).json({ message: "Schedule route missing" });
 		if (!schedule.bus) return res.status(400).json({ message: "Schedule bus not configured" });
+		if (schedule?.isActive === false) {
+			return res.status(400).json({ message: "Schedule is no longer active" });
+		}
+		if (schedule?.bus?.isActive === false) {
+			return res.status(400).json({ message: "Selected bus is no longer available" });
+		}
+
+		const scheduleDateMs = parseDateStartMs(schedule?.date);
+		if (!Number.isFinite(scheduleDateMs)) {
+			return res.status(400).json({ message: "Schedule travel date is invalid" });
+		}
+		if (scheduleDateMs < getTodayStartMs()) {
+			return res.status(400).json({ message: "Cannot book past schedules" });
+		}
 
 		const selectedBoardingPoint = pickSchedulePoint(schedule.boardingPoints, boardingPointName);
 		if (!selectedBoardingPoint) {
@@ -537,16 +671,14 @@ exports.getOperatorBookings = async (req, res) => {
 		let cancelledCount = 0;
 
 		const items = bookings.map((booking) => {
+			const bookingState = normalizeBookingDocument(booking);
 			const routeSource = String(booking?.schedule?.route?.source || "Unknown").trim();
 			const routeDestination = String(booking?.schedule?.route?.destination || "Unknown").trim();
 			const routeLabel = `${routeSource} -> ${routeDestination}`;
 
 			const busName = String(booking?.schedule?.bus?.name || "-").trim() || "-";
-			const bookingStatus = String(booking?.status || "confirmed").trim().toLowerCase();
-			const paymentStatus = String(
-				booking?.payment?.status
-				|| (bookingStatus === "confirmed" ? "paid" : bookingStatus)
-			).trim().toLowerCase();
+			const bookingStatus = bookingState.bookingStatus;
+			const paymentStatus = bookingState.paymentStatus;
 
 			const seats = Array.isArray(booking?.seats) ? booking.seats : [];
 			const totalPrice = Number(booking?.totalPrice);
@@ -566,7 +698,7 @@ exports.getOperatorBookings = async (req, res) => {
 				|| String(booking?.user?.name || "").trim()
 				|| String(booking?.user?.email || "Guest").trim();
 
-			const isRevenueBooking = bookingStatus !== "cancelled" && bookingStatus !== "payment_failed";
+			const isRevenueBooking = bookingStatus === BOOKING_STATUS.CONFIRMED && paymentStatus === PAYMENT_STATUS.PAID;
 			if (isRevenueBooking) {
 				totalRevenue += amount;
 				paidCount += 1;
@@ -648,7 +780,65 @@ exports.getMyBookings = async (req, res) => {
 		const bookings = await Booking.find({ user: req.user.id })
 			.sort({ createdAt: -1 })
 			.populate({ path: "schedule", populate: [{ path: "bus" }, { path: "route" }] });
-		return res.json(bookings);
+
+		const bookingStateById = new Map();
+		const pendingScheduleIds = new Set();
+
+		for (const booking of bookings) {
+			const bookingId = String(booking?._id || "");
+			const bookingState = await normalizeAndPersistBookingState(booking);
+			bookingStateById.set(bookingId, bookingState);
+
+			if (isPendingBooking(bookingState)) {
+				const scheduleId = String(getBookingScheduleId(booking) || "").trim();
+				if (scheduleId) pendingScheduleIds.add(scheduleId);
+			}
+		}
+
+		const lockIndex = await buildActiveLockIndex({
+			userId: req.user.id,
+			scheduleIds: [...pendingScheduleIds],
+		});
+
+		const lockWindowByBookingId = new Map();
+		for (const booking of bookings) {
+			const bookingId = String(booking?._id || "");
+			const bookingState = bookingStateById.get(bookingId);
+			if (!isPendingBooking(bookingState)) continue;
+
+			const lockWindow = resolveBookingLockWindow(booking, lockIndex);
+			const hasActiveLock = lockWindow.hasAllLocks
+				&& Number.isFinite(lockWindow.expiresAtMs)
+				&& lockWindow.expiresAtMs > Date.now();
+
+			if (!hasActiveLock) {
+				await markPendingBookingExpired(booking);
+				bookingStateById.set(bookingId, {
+					changed: false,
+					bookingStatus: BOOKING_STATUS.CANCELLED,
+					paymentStatus: PAYMENT_STATUS.FAILED,
+				});
+				continue;
+			}
+
+			lockWindowByBookingId.set(bookingId, lockWindow);
+		}
+
+		const nowMs = Date.now();
+		const response = bookings.map((booking) => {
+			const bookingId = String(booking?._id || "");
+			const bookingState = bookingStateById.get(bookingId);
+			const lockWindow = lockWindowByBookingId.get(bookingId);
+
+			return toClientBooking({
+				booking,
+				bookingState,
+				lockWindow,
+				nowMs,
+			});
+		});
+
+		return res.json(response);
 	} catch (e) {
 		return res.status(500).json({ message: e.message });
 	}
@@ -664,7 +854,36 @@ exports.getBookingById = async (req, res) => {
 		if (booking.user.toString() !== req.user.id && req.user.role !== "admin") {
 			return res.status(403).json({ message: "Forbidden" });
 		}
-		return res.json(booking);
+
+		const bookingState = await normalizeAndPersistBookingState(booking);
+		let lockWindow;
+
+		if (isPendingBooking(bookingState)) {
+			const lockIndex = await buildActiveLockIndex({
+				userId: booking.user,
+				scheduleIds: [String(getBookingScheduleId(booking) || "").trim()],
+			});
+
+			const resolvedLockWindow = resolveBookingLockWindow(booking, lockIndex);
+			const hasActiveLock = resolvedLockWindow.hasAllLocks
+				&& Number.isFinite(resolvedLockWindow.expiresAtMs)
+				&& resolvedLockWindow.expiresAtMs > Date.now();
+
+			if (!hasActiveLock) {
+				await markPendingBookingExpired(booking);
+				bookingState.bookingStatus = BOOKING_STATUS.CANCELLED;
+				bookingState.paymentStatus = PAYMENT_STATUS.FAILED;
+			} else {
+				lockWindow = resolvedLockWindow;
+			}
+		}
+
+		return res.json(toClientBooking({
+			booking,
+			bookingState,
+			lockWindow,
+			nowMs: Date.now(),
+		}));
 	} catch (e) {
 		return res.status(500).json({ message: e.message });
 	}
@@ -713,6 +932,9 @@ exports.cancelBooking = async (req, res) => {
 		}
 
 		booking.status = "cancelled";
+		if (booking.payment && booking.payment.status !== PAYMENT_STATUS.PAID) {
+			booking.payment.status = PAYMENT_STATUS.FAILED;
+		}
 		await booking.save();
 
 		await createAdminNotification({
