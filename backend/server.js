@@ -14,9 +14,12 @@ app.use(express.json());
 // Static assets (bus images, etc.)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-app.get("/api/health", (req, res) => {
+const sendApiHealth = (req, res) => {
 	res.json({ status: "ok" });
-});
+};
+
+app.get("/api/health", sendApiHealth);
+app.get("/api/status", sendApiHealth);
 
 // Routes
 app.use("/api/auth", require("./routes/auth.routes"));

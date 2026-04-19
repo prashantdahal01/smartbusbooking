@@ -31,8 +31,25 @@ export function formatCurrency(amount, currency = "NPR") {
 	}
 }
 
+const LOCAL_HOSTNAME_REGEX = /^(localhost|127\.0\.0\.1|::1)$/i;
+
+const normalizeApiUrl = (value) => String(value || "").trim().replace(/\/+$/g, "");
+
 export function getApiBaseUrl() {
-	return import.meta.env.VITE_API_URL || "http://localhost:5001/api";
+	const configuredUrl = normalizeApiUrl(import.meta.env.VITE_API_URL);
+	if (configuredUrl) return configuredUrl;
+
+	if (import.meta.env.PROD) {
+		// Deployed fallback. Requires rewrite/proxy for /api or explicit VITE_API_URL.
+		return "/api";
+	}
+
+	if (typeof window !== "undefined" && !LOCAL_HOSTNAME_REGEX.test(String(window.location.hostname || ""))) {
+		// Local LAN development fallback when app is opened via machine IP.
+		return `${window.location.protocol}//${window.location.hostname}:5001/api`;
+	}
+
+	return "http://localhost:5001/api";
 }
 
 export function getApiOrigin() {

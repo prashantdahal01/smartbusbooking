@@ -219,3 +219,29 @@ SMTP_FROM_ADDRESS=your_gmail@gmail.com
 ```bash
 VITE_API_URL=http://localhost:5001/api
 ```
+
+You can copy the frontend template and edit it:
+
+```bash
+cd frontend
+cp .env.example .env
+```
+
+## Production Deployment Notes
+
+For frontend deployments (Vercel/Netlify), set:
+
+```bash
+VITE_API_URL=https://your-public-backend-domain/api
+```
+
+Important:
+- Use a public HTTPS backend URL. Mobile devices cannot access localhost on your laptop.
+- Keep the trailing /api segment in VITE_API_URL.
+- After changing env vars on your hosting provider, redeploy the frontend.
+
+Quick health check from phone browser:
+
+```text
+https://your-public-backend-domain/api/health
+```

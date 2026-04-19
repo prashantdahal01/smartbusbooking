@@ -4,9 +4,9 @@
   "description": "Frontend for Smart Bus Booking System built with React + Vite",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "node ./node_modules/vite/bin/vite.js",
+    "build": "node ./node_modules/vite/bin/vite.js build",
+    "preview": "node ./node_modules/vite/bin/vite.js preview"
   },
   "dependencies": {
     "@react-three/drei": "^9.114.6",
@@ -22,6 +22,9 @@
     "react-router-dom": "^6.14.1",
     "recharts": "^3.8.1",
     "three": "^0.160.0"
+  },
+  "overrides": {
+    "three-mesh-bvh": "^0.8.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",

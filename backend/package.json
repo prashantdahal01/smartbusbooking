@@ -23,7 +23,8 @@
     "nodemailer": "^8.0.4",
     "pdfkit": "^0.18.0",
     "puppeteer": "^24.41.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "three-mesh-bvh": "^0.8.0"
   },
   "devDependencies": {
     "autoprefixer": "^10.4.27",
