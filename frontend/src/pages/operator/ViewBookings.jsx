@@ -1,231 +1,652 @@
-import { Filter, RefreshCcw, Ticket, Wallet } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { getOperatorBookings, getOperatorSchedules } from "../../services/operator.service";
+import {
+  AlertCircle,
+  BusFront,
+  CalendarDays,
+  Download,
+  MapPin,
+  Phone,
+  RefreshCcw,
+  Search,
+  Ticket,
+  UserRound,
+  Wallet,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { getOperatorBookings, getOperatorSeatStatus } from "../../services/operator.service";
 import { formatCurrency } from "../../utils/helpers";
 
-const routeLabel = (schedule) => {
-	const source = String(schedule?.route || schedule?.route?.source || "Unknown").trim();
-	const destination = String(schedule?.destination || schedule?.route?.destination || "").trim();
-	if (destination) return `${source} -> ${destination}`;
-	if (String(schedule?.route || "").includes("->")) return String(schedule.route);
-	return source;
+const DATE_KEY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+const statusTone = (status) => {
+  const token = String(status || "").trim().toLowerCase();
+  if (token === "confirmed") return "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100";
+  if (token === "pending") return "bg-amber-50 text-amber-700 ring-1 ring-amber-100";
+  if (token === "cancelled") return "bg-rose-50 text-rose-700 ring-1 ring-rose-100";
+  return "bg-slate-50 text-slate-700 ring-1 ring-slate-200";
+};
+
+const paymentTone = (status) => {
+  const token = String(status || "").trim().toLowerCase();
+  if (token === "paid") return "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100";
+  if (token === "pending") return "bg-amber-50 text-amber-700 ring-1 ring-amber-100";
+  if (token === "failed") return "bg-rose-50 text-rose-700 ring-1 ring-rose-100";
+  return "bg-slate-50 text-slate-700 ring-1 ring-slate-200";
+};
+
+const formatDateLabel = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+
+  if (DATE_KEY_REGEX.test(text)) {
+    const parsed = new Date(`${text}T00:00:00`);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleDateString();
+    }
+    return text;
+  }
+
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleString();
+  }
+
+  return text;
+};
+
+const isRevenueBooking = (booking) => {
+  const status = String(booking?.status || "").trim().toLowerCase();
+  const paymentStatus = String(booking?.paymentStatus || "").trim().toLowerCase();
+  return status === "confirmed" && paymentStatus === "paid";
+};
+
+const downloadCsv = (filename, rows) => {
+  const safeName = String(filename || "bookings.csv").replace(/[^\w.-]+/g, "_");
+  const csv = [
+    [
+      "Booking ID",
+      "Passenger",
+      "Passengers",
+      "Seats",
+      "Status",
+      "Payment",
+      "Booked At",
+      "Schedule Date",
+      "Bus",
+      "Route",
+      "Boarding",
+      "Dropping",
+      "Phone",
+      "Amount",
+    ].join(","),
+    ...rows.map((item) => {
+      const cells = [
+        item.id,
+        item.passengerName,
+        Array.isArray(item.passengerNames) ? item.passengerNames.join(" | ") : item.passengerName,
+        Array.isArray(item.seats) ? item.seats.join(" ") : "",
+        item.status,
+        item.paymentStatus,
+        item.bookedAt,
+        item.scheduleDate,
+        item.busName,
+        item.route,
+        item.boardingPoint,
+        item.droppingPoint,
+        item.phone,
+        item.amount,
+      ];
+
+      return cells
+        .map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`)
+        .join(",");
+    }),
+  ].join("\n");
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.setAttribute("download", safeName);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 };
 
 export default function ViewBookings() {
-	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState("");
-	const [bookings, setBookings] = useState([]);
-	const [summary, setSummary] = useState({ totalBookings: 0, totalRevenue: 0, paidCount: 0, cancelledCount: 0, byBus: [], byDay: [] });
-	const [availableSchedules, setAvailableSchedules] = useState([]);
+  const navigate = useNavigate();
 
-	const [scheduleFilter, setScheduleFilter] = useState("");
-	const [dateFilter, setDateFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
 
-	const loadBookings = async ({ schedule = scheduleFilter, date = dateFilter } = {}) => {
-		setLoading(true);
-		setError("");
+  const [dateFilter, setDateFilter] = useState("");
+  const [scheduleQuery, setScheduleQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [activeOnly, setActiveOnly] = useState(false);
 
-		try {
-			const payload = await getOperatorBookings({ schedule, date });
-			setBookings(Array.isArray(payload?.items) ? payload.items : []);
-			setSummary(payload?.summary || { totalBookings: 0, totalRevenue: 0, paidCount: 0, cancelledCount: 0, byBus: [], byDay: [] });
-			setAvailableSchedules(Array.isArray(payload?.availableSchedules) ? payload.availableSchedules : []);
-		} catch (err) {
-			setError(err?.response?.data?.message || err?.message || "Failed to load bookings");
-		} finally {
-			setLoading(false);
-		}
-	};
+  const [schedules, setSchedules] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [selectedScheduleId, setSelectedScheduleId] = useState("");
 
-	useEffect(() => {
-		let cancelled = false;
-		const preload = async () => {
-			setLoading(true);
-			setError("");
-			try {
-				const [schedules, payload] = await Promise.all([
-					getOperatorSchedules(),
-					getOperatorBookings(),
-				]);
+  const [seatSnapshot, setSeatSnapshot] = useState(null);
+  const [seatLoading, setSeatLoading] = useState(false);
+  const [seatError, setSeatError] = useState("");
 
-				if (cancelled) return;
-				setAvailableSchedules(Array.isArray(payload?.availableSchedules) && payload.availableSchedules.length > 0
-					? payload.availableSchedules
-					: (Array.isArray(schedules) ? schedules.map((row) => ({
-						id: String(row?._id || ""),
-						date: row?.date,
-						time: row?.time,
-						route: `${row?.route?.source || "Unknown"} -> ${row?.route?.destination || "Unknown"}`,
-						busName: row?.bus?.name || "",
-						isActive: row?.isActive !== false,
-					})) : []));
-				setBookings(Array.isArray(payload?.items) ? payload.items : []);
-				setSummary(payload?.summary || { totalBookings: 0, totalRevenue: 0, paidCount: 0, cancelledCount: 0, byBus: [], byDay: [] });
-			} catch (err) {
-				if (cancelled) return;
-				setError(err?.response?.data?.message || err?.message || "Failed to load bookings");
-			} finally {
-				if (!cancelled) setLoading(false);
-			}
-		};
+  const loadBookings = useCallback(async ({ silent = false } = {}) => {
+    if (!silent) setLoading(true);
+    setError("");
 
-		preload();
-		return () => {
-			cancelled = true;
-		};
-	}, []);
+    try {
+      const payload = await getOperatorBookings({
+        date: dateFilter || undefined,
+      });
 
-	const rows = useMemo(() => bookings, [bookings]);
+      const availableSchedules = Array.isArray(payload?.availableSchedules)
+        ? [...payload.availableSchedules]
+        : [];
+      availableSchedules.sort((a, b) => {
+        const aKey = `${String(a?.date || "")} ${String(a?.time || "")}`.trim();
+        const bKey = `${String(b?.date || "")} ${String(b?.time || "")}`.trim();
+        return bKey.localeCompare(aKey);
+      });
 
-	return (
-		<div className="space-y-5">
-			<div className="flex flex-wrap items-end justify-between gap-3">
-				<div>
-					<h2 className="text-2xl font-bold text-slate-900">View Bookings</h2>
-					<p className="text-sm text-slate-500">Track booked passengers, seat status, and earnings.</p>
-				</div>
+      setSchedules(availableSchedules);
+      setBookings(Array.isArray(payload?.items) ? payload.items : []);
+    } catch (err) {
+      setError(err?.response?.data?.message || err?.message || "Failed to load bookings");
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [dateFilter]);
 
-				<button
-					type="button"
-					onClick={() => loadBookings({ schedule: scheduleFilter, date: dateFilter })}
-					className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-				>
-					<RefreshCcw className="h-4 w-4" />
-					Refresh
-				</button>
-			</div>
+  useEffect(() => {
+    loadBookings();
+  }, [loadBookings]);
 
-			<section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-				<div className="admin-surface p-4">
-					<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Bookings</p>
-					<p className="mt-2 flex items-center gap-2 text-2xl font-bold text-slate-900">
-						<Ticket className="h-5 w-5 text-orange-500" />
-						{summary.totalBookings || 0}
-					</p>
-				</div>
-				<div className="admin-surface p-4">
-					<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Revenue</p>
-					<p className="mt-2 flex items-center gap-2 text-2xl font-bold text-slate-900">
-						<Wallet className="h-5 w-5 text-emerald-500" />
-						{formatCurrency(summary.totalRevenue || 0)}
-					</p>
-				</div>
-				<div className="admin-surface p-4">
-					<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Paid/Confirmed</p>
-					<p className="mt-2 text-2xl font-bold text-slate-900">{summary.paidCount || 0}</p>
-				</div>
-				<div className="admin-surface p-4">
-					<p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Cancelled/Failed</p>
-					<p className="mt-2 text-2xl font-bold text-slate-900">{summary.cancelledCount || 0}</p>
-				</div>
-			</section>
+  useEffect(() => {
+    if (!schedules.length) {
+      setSelectedScheduleId("");
+      return;
+    }
 
-			<section className="admin-surface p-4">
-				<div className="grid gap-3 md:grid-cols-[1.2fr_1fr_auto]">
-					<div className="grid gap-2">
-						<label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="booking-schedule">Schedule</label>
-						<select
-							id="booking-schedule"
-							value={scheduleFilter}
-							onChange={(event) => setScheduleFilter(event.target.value)}
-							className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-orange-200 focus:ring-2 focus:ring-orange-100"
-						>
-							<option value="">All schedules</option>
-							{availableSchedules.map((schedule) => (
-								<option key={schedule.id} value={schedule.id}>
-									{schedule.date} {schedule.time} | {schedule.route}
-								</option>
-							))}
-						</select>
-					</div>
+    setSelectedScheduleId((previous) => {
+      if (previous && schedules.some((row) => row.id === previous)) return previous;
+      return schedules[0].id;
+    });
+  }, [schedules]);
 
-					<div className="grid gap-2">
-						<label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="booking-date">Date</label>
-						<input
-							id="booking-date"
-							type="date"
-							value={dateFilter}
-							onChange={(event) => setDateFilter(event.target.value)}
-							className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-orange-200 focus:ring-2 focus:ring-orange-100"
-						/>
-					</div>
+  const filteredSchedules = useMemo(() => {
+    const query = String(scheduleQuery || "").trim().toLowerCase();
+    return schedules.filter((schedule) => {
+      if (activeOnly && schedule?.isActive === false) return false;
+      if (!query) return true;
 
-					<button
-						type="button"
-						onClick={() => loadBookings({ schedule: scheduleFilter, date: dateFilter })}
-						className="inline-flex h-11 items-center justify-center gap-2 self-end rounded-xl bg-orange-500 px-4 text-sm font-semibold text-white transition hover:bg-orange-600"
-					>
-						<Filter className="h-4 w-4" />
-						Apply Filters
-					</button>
-				</div>
-			</section>
+      const haystack = `${schedule?.route || ""} ${schedule?.busName || ""} ${schedule?.date || ""} ${schedule?.time || ""}`
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [activeOnly, scheduleQuery, schedules]);
 
-			{error ? (
-				<div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-					{error}
-				</div>
-			) : null}
+  useEffect(() => {
+    if (!filteredSchedules.length) return;
+    if (filteredSchedules.some((schedule) => schedule.id === selectedScheduleId)) return;
+    setSelectedScheduleId(filteredSchedules[0].id);
+  }, [filteredSchedules, selectedScheduleId]);
 
-			<section className="admin-surface overflow-hidden">
-				<div className="overflow-x-auto">
-					<table className="min-w-full divide-y divide-slate-200 text-sm">
-						<thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
-							<tr>
-								<th className="px-4 py-3 font-semibold">Passenger</th>
-								<th className="px-4 py-3 font-semibold">Route / Bus</th>
-								<th className="px-4 py-3 font-semibold">Seats</th>
-								<th className="px-4 py-3 font-semibold">Boarding to Drop</th>
-								<th className="px-4 py-3 font-semibold">Status</th>
-								<th className="px-4 py-3 font-semibold">Amount</th>
-							</tr>
-						</thead>
-						<tbody className="divide-y divide-slate-100 bg-white">
-							{loading ? (
-								<tr>
-									<td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">Loading bookings...</td>
-								</tr>
-							) : rows.length === 0 ? (
-								<tr>
-									<td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">No bookings found for selected filters.</td>
-								</tr>
-							) : (
-								rows.map((row) => (
-									<tr key={row.id} className="hover:bg-slate-50/70">
-										<td className="px-4 py-3 align-top">
-											<p className="font-semibold text-slate-900">{row.passengerName}</p>
-											<p className="mt-1 text-xs text-slate-500">{row.phone || "-"}</p>
-										</td>
-										<td className="px-4 py-3 align-top">
-											<p className="font-semibold text-slate-900">{row.route}</p>
-											<p className="mt-1 text-xs text-slate-500">{row.busName} | {row.scheduleDate} {row.scheduleTime}</p>
-										</td>
-										<td className="px-4 py-3 align-top text-slate-700">
-											{Array.isArray(row.seats) && row.seats.length > 0 ? row.seats.join(", ") : "-"}
-										</td>
-										<td className="px-4 py-3 align-top text-slate-700">
-											{row.boardingPoint || "-"} {"->"} {row.droppingPoint || "-"}
-										</td>
-										<td className="px-4 py-3 align-top">
-											<span className={`rounded-full px-2 py-1 text-xs font-semibold ${
-												row.status === "cancelled" || row.status === "payment_failed"
-													? "bg-rose-100 text-rose-700"
-													: "bg-emerald-100 text-emerald-700"
-											}`}>
-												{row.status}
-											</span>
-											<p className="mt-1 text-xs text-slate-500">Payment: {row.paymentStatus || "-"}</p>
-										</td>
-										<td className="px-4 py-3 align-top font-semibold text-slate-900">
-											{formatCurrency(row.amount || 0)}
-										</td>
-									</tr>
-								))
-							)}
-						</tbody>
-					</table>
-				</div>
-			</section>
-		</div>
-	);
+  const selectedSchedule = useMemo(
+    () => schedules.find((schedule) => schedule.id === selectedScheduleId) || null,
+    [schedules, selectedScheduleId]
+  );
+
+  const scheduleBookings = useMemo(() => {
+    if (!selectedScheduleId) return [];
+
+    const statusToken = String(statusFilter || "all").trim().toLowerCase();
+    const filtered = bookings
+      .filter((booking) => booking?.scheduleId === selectedScheduleId)
+      .filter((booking) => {
+        if (statusToken === "all") return true;
+        return String(booking?.status || "").trim().toLowerCase() === statusToken;
+      });
+
+    return filtered.sort((a, b) => {
+      const aTime = new Date(a?.bookedAt || 0).getTime();
+      const bTime = new Date(b?.bookedAt || 0).getTime();
+      return bTime - aTime;
+    });
+  }, [bookings, selectedScheduleId, statusFilter]);
+
+  const scheduleRevenue = useMemo(
+    () => scheduleBookings.reduce((sum, booking) => {
+      if (!isRevenueBooking(booking)) return sum;
+      return sum + (Number(booking?.amount) || 0);
+    }, 0),
+    [scheduleBookings]
+  );
+
+  const scheduleBookedSeatCount = useMemo(
+    () => scheduleBookings.reduce((sum, booking) => {
+      if (String(booking?.status || "").trim().toLowerCase() !== "confirmed") return sum;
+      const seatCount = Array.isArray(booking?.seats) ? booking.seats.length : 0;
+      return sum + seatCount;
+    }, 0),
+    [scheduleBookings]
+  );
+
+  const todayDate = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }, []);
+
+  useEffect(() => {
+    if (!selectedScheduleId) {
+      setSeatSnapshot(null);
+      setSeatError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadSeatSnapshot = async () => {
+      setSeatLoading(true);
+      setSeatError("");
+      try {
+        const payload = await getOperatorSeatStatus(selectedScheduleId);
+        if (cancelled) return;
+
+        const totalSeats = Number.isFinite(Number(payload?.totalSeats))
+          ? Number(payload.totalSeats)
+          : 0;
+        const bookedSeats = Array.isArray(payload?.bookedSeats)
+          ? payload.bookedSeats.length
+          : 0;
+
+        setSeatSnapshot({
+          totalSeats,
+          bookedSeats,
+          availableSeats: Math.max(0, totalSeats - bookedSeats),
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setSeatSnapshot(null);
+        setSeatError(err?.response?.data?.message || err?.message || "Seat snapshot unavailable for this schedule");
+      } finally {
+        if (!cancelled) setSeatLoading(false);
+      }
+    };
+
+    loadSeatSnapshot();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedScheduleId, bookings.length]);
+
+  const refreshData = async () => {
+    setRefreshing(true);
+    await loadBookings({ silent: true });
+    setRefreshing(false);
+  };
+
+  const goToPassengers = () => {
+    if (!selectedScheduleId) return;
+    navigate(`/operator/passengers/${selectedScheduleId}`);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900">Bookings</h2>
+          <p className="text-sm text-slate-500">
+            Live schedule bookings with seat occupancy and payment visibility.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={refreshData}
+            className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            <RefreshCcw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={goToPassengers}
+            disabled={!selectedScheduleId}
+            className="inline-flex h-10 items-center gap-2 rounded-xl bg-orange-500 px-3 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <UserRound className="h-4 w-4" />
+            Passenger List
+          </button>
+        </div>
+      </div>
+
+      <section className="admin-surface p-4">
+        <div className="grid gap-3 md:grid-cols-4">
+          <label className="grid gap-1 text-sm">
+            <span className="font-semibold text-slate-700">Travel Date</span>
+            <input
+              type="date"
+              value={dateFilter}
+              onChange={(event) => setDateFilter(event.target.value)}
+              className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-orange-200 focus:ring-2 focus:ring-orange-100"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm">
+            <span className="font-semibold text-slate-700">Booking Status</span>
+            <select
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+              className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-orange-200 focus:ring-2 focus:ring-orange-100"
+            >
+              <option value="all">All statuses</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="pending">Pending</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </label>
+
+          <label className="grid gap-1 text-sm md:col-span-2">
+            <span className="font-semibold text-slate-700">Search Schedules</span>
+            <div className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3">
+              <Search className="h-4 w-4 text-slate-400" />
+              <input
+                value={scheduleQuery}
+                onChange={(event) => setScheduleQuery(event.target.value)}
+                placeholder="Route, bus, date, time"
+                className="w-full bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400"
+              />
+            </div>
+          </label>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setDateFilter(todayDate)}
+            className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            <CalendarDays className="h-3.5 w-3.5" />
+            Today
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDateFilter("");
+              setStatusFilter("all");
+              setScheduleQuery("");
+              setActiveOnly(false);
+            }}
+            className="inline-flex h-9 items-center rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Clear filters
+          </button>
+
+          <label className="ml-auto inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+            <input
+              type="checkbox"
+              checked={activeOnly}
+              onChange={(event) => setActiveOnly(event.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 text-orange-500 focus:ring-orange-200"
+            />
+            Show active schedules only
+          </label>
+        </div>
+      </section>
+
+      {error ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          {error}
+        </div>
+      ) : null}
+
+      <section className="grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)] lg:items-start">
+        <aside className="admin-surface overflow-hidden">
+          <div className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
+            <p className="text-sm font-semibold text-slate-900">Schedules</p>
+            <span className="text-xs text-slate-500">{filteredSchedules.length} visible</span>
+          </div>
+
+          <div className="max-h-[calc(100vh-280px)] overflow-auto p-3">
+            {loading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <div key={`schedule-skeleton-${index}`} className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="skeleton h-4 w-2/3" />
+                    <div className="mt-2 skeleton h-3.5 w-1/2" />
+                    <div className="mt-2 skeleton h-3.5 w-1/3" />
+                  </div>
+                ))}
+              </div>
+            ) : filteredSchedules.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-6 text-center">
+                <MapPin className="mx-auto h-8 w-8 text-slate-300" />
+                <p className="mt-2 text-sm font-semibold text-slate-800">No schedules found</p>
+                <p className="mt-1 text-xs text-slate-500">Try changing filters or search terms.</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {filteredSchedules.map((schedule) => {
+                  const isSelected = schedule.id === selectedScheduleId;
+                  return (
+                    <button
+                      key={schedule.id}
+                      type="button"
+                      onClick={() => setSelectedScheduleId(schedule.id)}
+                      className={[
+                        "w-full rounded-2xl border p-4 text-left transition",
+                        isSelected ? "border-orange-200 bg-orange-50/70 shadow-sm" : "border-slate-200 bg-white hover:bg-slate-50",
+                      ].join(" ")}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-bold text-slate-900">{schedule.route}</p>
+                          <p className="mt-1 truncate text-xs text-slate-500">{schedule.busName || "Unassigned Bus"}</p>
+                        </div>
+                        <span
+                          className={[
+                            "shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide",
+                            schedule?.isActive === false
+                              ? "bg-slate-100 text-slate-600 ring-1 ring-slate-200"
+                              : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100",
+                          ].join(" ")}
+                        >
+                          {schedule?.isActive === false ? "Inactive" : "Active"}
+                        </span>
+                      </div>
+
+                      <div className="mt-3 flex items-center justify-between text-xs text-slate-600">
+                        <span className="inline-flex items-center gap-1.5">
+                          <CalendarDays className="h-3.5 w-3.5 text-orange-500" />
+                          {formatDateLabel(schedule?.date)}
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <Ticket className="h-3.5 w-3.5 text-slate-400" />
+                          {schedule?.time || "--:--"}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </aside>
+
+        <div className="space-y-4">
+          {!selectedSchedule ? (
+            <div className="admin-surface p-10 text-center">
+              <MapPin className="mx-auto h-10 w-10 text-slate-300" />
+              <h3 className="mt-3 text-lg font-bold text-slate-900">Select a schedule</h3>
+              <p className="mt-1 text-sm text-slate-500">
+                Choose a schedule from the left to see live bookings and seats.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="admin-surface p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Schedule</p>
+                    <h3 className="mt-1 text-xl font-extrabold text-slate-900">{selectedSchedule.route}</h3>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {selectedSchedule.busName || "Unassigned Bus"} • {formatDateLabel(selectedSchedule.date)} at {selectedSchedule.time || "--:--"}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => downloadCsv(`bookings-${selectedSchedule.id}.csv`, scheduleBookings)}
+                    disabled={!scheduleBookings.length}
+                    className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Download className="h-4 w-4" />
+                    Export CSV
+                  </button>
+                </div>
+              </div>
+
+              <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <div className="admin-surface p-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Confirmed Seats</p>
+                  <p className="mt-2 flex items-center gap-2 text-2xl font-bold text-slate-900">
+                    <Ticket className="h-5 w-5 text-orange-500" />
+                    {scheduleBookedSeatCount}
+                  </p>
+                </div>
+
+                <div className="admin-surface p-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Seat Capacity</p>
+                  {seatLoading ? (
+                    <div className="mt-2 skeleton h-8 w-20" />
+                  ) : (
+                    <p className="mt-2 text-2xl font-bold text-slate-900">
+                      {seatSnapshot ? `${seatSnapshot.bookedSeats}/${seatSnapshot.totalSeats}` : "-"}
+                    </p>
+                  )}
+                  {seatError ? (
+                    <p className="mt-1 text-xs text-rose-600">{seatError}</p>
+                  ) : seatSnapshot ? (
+                    <p className="mt-1 text-xs text-slate-500">{seatSnapshot.availableSeats} seats available</p>
+                  ) : null}
+                </div>
+
+                <div className="admin-surface p-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Revenue Collected</p>
+                  <p className="mt-2 flex items-center gap-2 text-2xl font-bold text-slate-900">
+                    <Wallet className="h-5 w-5 text-emerald-600" />
+                    {formatCurrency(scheduleRevenue)}
+                  </p>
+                </div>
+
+                <div className="admin-surface p-5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Bookings</p>
+                  <p className="mt-2 flex items-center gap-2 text-2xl font-bold text-slate-900">
+                    <BusFront className="h-5 w-5 text-blue-600" />
+                    {scheduleBookings.length}
+                  </p>
+                </div>
+              </section>
+
+              <section className="admin-surface overflow-hidden">
+                <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-900">Booking Records</p>
+                  <p className="text-xs text-slate-500">{scheduleBookings.length} records</p>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">Passenger</th>
+                        <th className="px-4 py-3 font-semibold">Seats</th>
+                        <th className="px-4 py-3 font-semibold">Status</th>
+                        <th className="px-4 py-3 font-semibold">Payment</th>
+                        <th className="px-4 py-3 font-semibold">Booked</th>
+                        <th className="px-4 py-3 font-semibold">Contact</th>
+                        <th className="px-4 py-3 font-semibold">Boarding</th>
+                        <th className="px-4 py-3 font-semibold text-right">Amount</th>
+                      </tr>
+                    </thead>
+
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {scheduleBookings.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-10 text-center text-sm text-slate-500">
+                            No bookings for this schedule.
+                          </td>
+                        </tr>
+                      ) : (
+                        scheduleBookings.map((booking) => (
+                          <tr key={booking.id} className="hover:bg-slate-50/70">
+                            <td className="px-4 py-3 align-top">
+                              <p className="font-semibold text-slate-900">{booking.passengerName || "Unknown"}</p>
+                              {Array.isArray(booking?.passengerNames) && booking.passengerNames.length > 1 ? (
+                                <p className="mt-1 text-xs text-slate-500">
+                                  {booking.passengerNames.length} passengers
+                                </p>
+                              ) : null}
+                            </td>
+
+                            <td className="px-4 py-3 align-top font-semibold text-slate-900">
+                              {Array.isArray(booking?.seats) && booking.seats.length > 0 ? booking.seats.join(", ") : "-"}
+                            </td>
+
+                            <td className="px-4 py-3 align-top">
+                              <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${statusTone(booking?.status)}`}>
+                                {String(booking?.status || "-")}
+                              </span>
+                            </td>
+
+                            <td className="px-4 py-3 align-top">
+                              <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${paymentTone(booking?.paymentStatus)}`}>
+                                {String(booking?.paymentStatus || "-")}
+                              </span>
+                            </td>
+
+                            <td className="px-4 py-3 align-top text-slate-700">{formatDateLabel(booking?.bookedAt)}</td>
+
+                            <td className="px-4 py-3 align-top text-slate-700">
+                              <span className="inline-flex items-center gap-2">
+                                <Phone className="h-3.5 w-3.5 text-slate-400" />
+                                {booking?.phone || "-"}
+                              </span>
+                            </td>
+
+                            <td className="px-4 py-3 align-top text-slate-700">
+                              <p>{booking?.boardingPoint || "-"}</p>
+                              <p className="text-xs text-slate-500">to {booking?.droppingPoint || "-"}</p>
+                            </td>
+
+                            <td className="px-4 py-3 align-top text-right font-semibold text-slate-900">
+                              {formatCurrency(booking?.amount || 0)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </section>
+
+      {!loading && !schedules.length ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="inline-flex items-center gap-2 font-semibold">
+            <AlertCircle className="h-4 w-4" />
+            No schedules available for the selected filters.
+          </p>
+          <p className="mt-1 text-xs">Try clearing filters or creating schedules from the Manage Schedules page.</p>
+        </div>
+      ) : null}
+    </div>
+  );
 }

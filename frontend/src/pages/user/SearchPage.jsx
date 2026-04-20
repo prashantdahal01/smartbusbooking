@@ -311,8 +311,8 @@ const matchesTextOption = (haystackValues, requiredTokens) => {
 export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const initialSource = searchParams.get("source") || "";
-  const initialDestination = searchParams.get("destination") || "";
+  const initialSource = searchParams.get("source") || searchParams.get("from") || "";
+  const initialDestination = searchParams.get("destination") || searchParams.get("to") || "";
   const initialDateParam = searchParams.get("date") || "";
   const initialDate = initialDateParam || "";
   const initialHasAnyParam = Boolean(initialSource || initialDestination || initialDateParam);
@@ -346,8 +346,8 @@ export default function SearchPage() {
 
       if (syncQuery) {
         const query = {};
-        if (payload.source) query.source = payload.source;
-        if (payload.destination) query.destination = payload.destination;
+        if (payload.source) query.from = payload.source;
+        if (payload.destination) query.to = payload.destination;
         if (payload.date) query.date = payload.date;
         setSearchParams(query, { replace: true });
       }
@@ -373,11 +373,16 @@ export default function SearchPage() {
   };
 
   useEffect(() => {
-    const hasAnyParam = searchParams.has("source") || searchParams.has("destination") || searchParams.has("date");
+    const hasAnyParam =
+      searchParams.has("source")
+      || searchParams.has("destination")
+      || searchParams.has("from")
+      || searchParams.has("to")
+      || searchParams.has("date");
     if (!hasAnyParam) return;
 
-    const sourceValue = searchParams.get("source") || "";
-    const destinationValue = searchParams.get("destination") || "";
+    const sourceValue = searchParams.get("source") || searchParams.get("from") || "";
+    const destinationValue = searchParams.get("destination") || searchParams.get("to") || "";
     const dateValue = searchParams.get("date") || "";
 
     setSource(sourceValue);

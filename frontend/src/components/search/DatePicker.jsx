@@ -1,5 +1,6 @@
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -71,6 +72,7 @@ const resolveMinDate = (minDate, today) => {
 
 export default function DatePicker({ value, onChange, minDate }) {
   const rootRef = useRef(null);
+  const popupRef = useRef(null);
   const triggerRef = useRef(null);
   const dayButtonRefs = useRef(new Map());
 
@@ -84,6 +86,7 @@ export default function DatePicker({ value, onChange, minDate }) {
     return startOfMonth(initial);
   });
   const [focusedDate, setFocusedDate] = useState(() => parseDateKey(value) || minAllowedDate || today);
+  const [desktopPopupStyle, setDesktopPopupStyle] = useState(null);
 
   useEffect(() => {
     const parsed = parseDateKey(value);
@@ -109,7 +112,7 @@ export default function DatePicker({ value, onChange, minDate }) {
     if (!isOpen) return undefined;
 
     const onPointerDown = (event) => {
-      if (!rootRef.current?.contains(event.target)) {
+      if (!rootRef.current?.contains(event.target) && !popupRef.current?.contains(event.target)) {
         setIsOpen(false);
       }
     };
@@ -120,6 +123,53 @@ export default function DatePicker({ value, onChange, minDate }) {
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("touchstart", onPointerDown);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setDesktopPopupStyle(null);
+      return;
+    }
+
+    const updatePosition = () => {
+      const triggerEl = triggerRef.current;
+      if (!triggerEl) return;
+
+      const rect = triggerEl.getBoundingClientRect();
+      const viewportW = window.innerWidth || 0;
+      const viewportH = window.innerHeight || 0;
+
+      const basePopupWidth = 352; // Tailwind w-88
+      const popupWidth = Math.max(240, Math.min(basePopupWidth, viewportW - 24));
+      const popupHeight = 430; // approximate; enough to decide flip
+      const gap = 8;
+
+      const preferBelowTop = rect.bottom + gap;
+      const preferAboveTop = rect.top - gap - popupHeight;
+      const fitsBelow = preferBelowTop + popupHeight <= viewportH - 12;
+
+      const top = fitsBelow ? preferBelowTop : Math.max(12, preferAboveTop);
+      const alignLeft = rect.left;
+      const alignRight = rect.right - popupWidth;
+      const idealLeft = (alignLeft + popupWidth <= viewportW - 12) ? alignLeft : alignRight;
+      const left = Math.min(Math.max(12, idealLeft), Math.max(12, viewportW - popupWidth - 12));
+
+      setDesktopPopupStyle({
+        position: "fixed",
+        top,
+        left,
+        width: popupWidth,
+        zIndex: 60,
+      });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
     };
   }, [isOpen]);
 
@@ -411,9 +461,18 @@ export default function DatePicker({ value, onChange, minDate }) {
       ) : null}
 
       {isOpen ? (
-        <div className="absolute left-0 top-[calc(100%+0.5rem)] z-30 hidden w-88 rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-300/60 md:block">
-          {renderCalendarBody()}
-        </div>
+        (typeof document !== "undefined"
+          ? createPortal(
+            <div
+              ref={popupRef}
+              className="hidden rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-300/60 md:block"
+              style={desktopPopupStyle || undefined}
+            >
+              {renderCalendarBody()}
+            </div>,
+            document.body
+          )
+          : null)
       ) : null}
 
       {isOpen ? (

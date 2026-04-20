@@ -11,6 +11,35 @@ const TYPE_LABELS = Object.freeze({
 const normalizeText = (value) => String(value || "").trim();
 const normalizeKey = (value) => normalizeText(value).toLowerCase();
 
+const pickFirstNonEmpty = (...candidates) => {
+  for (const candidate of candidates) {
+    const value = normalizeText(candidate);
+    if (value) return value;
+  }
+  return "";
+};
+
+const buildLocationMeta = (raw) => {
+  if (!raw || typeof raw !== "object") return { district: "", province: "", state: "" };
+  const district = pickFirstNonEmpty(
+    raw.district,
+    raw.districtName,
+    raw.district_name,
+    raw.adminDistrict,
+    raw.admin_district
+  );
+  const province = pickFirstNonEmpty(
+    raw.province,
+    raw.provinceName,
+    raw.province_name,
+    raw.state,
+    raw.stateName,
+    raw.state_name
+  );
+  const state = pickFirstNonEmpty(raw.state, raw.stateName, raw.state_name);
+  return { district, province, state };
+};
+
 const splitHighlight = (label, query) => {
   const safeLabel = String(label || "");
   const safeQuery = normalizeText(query);
@@ -138,10 +167,15 @@ export default function LocationAutocompleteInput({
       const name = normalizeText(item?.name);
       const type = normalizeKey(item?.type);
       const label = TYPE_LABELS[type] || "Location";
+      const meta = buildLocationMeta(item);
+      const secondaryParts = [meta.district, meta.province].filter(Boolean);
+      const secondaryLabel = secondaryParts.join(", ");
       return {
         name,
         type,
         typeLabel: label,
+        secondaryLabel,
+        raw: item,
       };
     }).filter((item) => item.name);
   }, [suggestions]);
@@ -153,7 +187,7 @@ export default function LocationAutocompleteInput({
     setIsOpen(false);
     setHighlightedIndex(-1);
     if (typeof onSelect === "function") {
-      onSelect(item);
+      onSelect(item.raw || item);
     }
   };
 
@@ -244,6 +278,7 @@ export default function LocationAutocompleteInput({
                 {suggestionRows.map((item, index) => {
                   const isActive = index === highlightedIndex;
                   const parts = splitHighlight(item.name, query);
+                  const secondaryParts = splitHighlight(item.secondaryLabel, query);
                   return (
                     <button
                       key={`${item.name}-${item.type}-${index}`}
@@ -253,14 +288,23 @@ export default function LocationAutocompleteInput({
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => selectSuggestion(item)}
                       onMouseEnter={() => setHighlightedIndex(index)}
-                      className={`flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${isActive ? "bg-violet-50 text-slate-900" : "text-slate-700 hover:bg-slate-50"}`}
+                      className={`flex w-full items-start justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm transition ${isActive ? "bg-violet-50 text-slate-900" : "text-slate-700 hover:bg-slate-50"}`}
                     >
                       <span className="inline-flex min-w-0 items-center gap-2">
                         <MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                        <span className="truncate">
-                          {parts.before}
-                          {parts.match ? <span className={highlightClassName}>{parts.match}</span> : null}
-                          {parts.after}
+                        <span className="min-w-0">
+                          <span className="block truncate">
+                            {parts.before}
+                            {parts.match ? <span className={highlightClassName}>{parts.match}</span> : null}
+                            {parts.after}
+                          </span>
+                          {item.secondaryLabel ? (
+                            <span className="mt-0.5 block truncate text-xs text-slate-500">
+                              {secondaryParts.before}
+                              {secondaryParts.match ? <span className={highlightClassName}>{secondaryParts.match}</span> : null}
+                              {secondaryParts.after}
+                            </span>
+                          ) : null}
                         </span>
                       </span>
                       <span className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">

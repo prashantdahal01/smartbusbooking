@@ -34,6 +34,11 @@ const ManageOperatorBuses = lazy(() => import("./pages/operator/ManageBuses"));
 const ManageOperatorSchedules = lazy(() => import("./pages/operator/ManageSchedules"));
 const ViewOperatorBookings = lazy(() => import("./pages/operator/ViewBookings"));
 const OperatorProfile = lazy(() => import("./pages/operator/OperatorProfile"));
+const OperatorRoutesPage = lazy(() => import("./pages/operator/RoutesPage"));
+const OperatorPassengersPage = lazy(() => import("./pages/operator/PassengersPage"));
+const OperatorPassengerList = lazy(() => import("./pages/operator/PassengerList"));
+const OperatorReportsPage = lazy(() => import("./pages/operator/ReportsPage"));
+const OperatorSettingsPage = lazy(() => import("./pages/operator/OperatorSettings"));
 
 function RouteFallback() {
   return (
@@ -117,6 +122,11 @@ function AppShell() {
               <Route path="buses" element={<ManageOperatorBuses />} />
               <Route path="schedules" element={<ManageOperatorSchedules />} />
               <Route path="bookings" element={<ViewOperatorBookings />} />
+              <Route path="routes" element={<OperatorRoutesPage />} />
+              <Route path="passengers" element={<OperatorPassengersPage />} />
+              <Route path="passengers/:scheduleId" element={<OperatorPassengerList />} />
+              <Route path="reports" element={<OperatorReportsPage />} />
+              <Route path="settings" element={<OperatorSettingsPage />} />
               <Route path="profile" element={<OperatorProfile />} />
             </Route>
           </Routes>
