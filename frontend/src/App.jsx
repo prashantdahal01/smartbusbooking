@@ -1,6 +1,7 @@
 // Root React component with React Router configuration
 // Defines all application routes with role-based protection
 import { Suspense, lazy } from "react";
+import { Toaster } from "react-hot-toast";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -141,6 +142,30 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <AppShell />
+        <Toaster
+          position="top-center"
+          toastOptions={{
+            duration: 3200,
+            style: {
+              background: "#0f172a",
+              color: "#ffffff",
+              borderRadius: "12px",
+              fontSize: "14px",
+            },
+            success: {
+              style: {
+                background: "#047857",
+                color: "#ffffff",
+              },
+            },
+            error: {
+              style: {
+                background: "#be123c",
+                color: "#ffffff",
+              },
+            },
+          }}
+        />
       </BrowserRouter>
     </AuthProvider>
   );

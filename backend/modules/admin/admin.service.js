@@ -1,16 +1,17 @@
 // Handles admin-level operations: managing users, buses, routes, and schedules
-const fs = require("fs");
-const path = require("path");
 const mongoose = require("mongoose");
-const Bus = require("../models/Bus");
-const City = require("../models/City");
-const Route = require("../models/Route");
-const Schedule = require("../models/Schedule");
-const Stop = require("../models/Stop");
-const User = require("../models/User");
-const Booking = require("../models/Booking");
-const Notification = require("../models/Notification");
-const { createAdminNotification } = require("../services/notification.service");
+const {
+  Bus,
+  City,
+  Route,
+  Schedule,
+  Stop,
+  User,
+  Booking,
+  Notification,
+} = require("./admin.model");
+const cloudinary = require("../../config/cloudinary");
+const { createAdminNotification } = require("../../services/notification.service");
 const {
   normalizeKey,
   normalizeText,
@@ -18,7 +19,7 @@ const {
   isValidTimeHHmm,
   normalizeRoutePointList,
   getRoutePointLanes,
-} = require("../utils/routePoints");
+} = require("../../utils/routePoints");
 
 const stopKey = (s) => normalizeKey(s);
 const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -58,8 +59,7 @@ const legacyTypeToBusCategory = {
 };
 const DEPRECATED_SCHEDULE_PRICE_FIELDS = ["price", "priceMin", "priceMax"];
 const BUS_IMAGE_TYPES = ["bus", "seatLayout", "sleeperLayout"];
-const BUS_UPLOAD_PUBLIC_PREFIX = "/uploads/buses/";
-const busUploadsDir = path.join(__dirname, "..", "uploads", "buses");
+const CLOUDINARY_HOST_RE = /(^|\.)cloudinary\.com$/i;
 
 const normalizeSeatLabel = (value) => String(value || "").trim().toUpperCase().replace(/\s+/g, "");
 const normalizeBusTypeValue = (value) => String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "_");
@@ -219,9 +219,8 @@ const firstUploadedFile = (files, fieldName) => {
 };
 
 const toBusImagePublicPath = (file) => {
-  const filename = normalizeImagePath(file?.filename);
-  if (!filename) return "";
-  return `${BUS_UPLOAD_PUBLIC_PREFIX}${filename}`;
+  const uploadedPath = normalizeImagePath(file?.path || file?.secure_url || file?.url);
+  return uploadedPath;
 };
 
 const extractUploadedBusImagePaths = (files = {}) => ({
@@ -270,21 +269,55 @@ const withBusImageCompatibility = (busDoc) => {
   return bus;
 };
 
-const resolveBusImageAbsolutePath = (publicPath) => {
-  const safePath = normalizeImagePath(publicPath);
-  if (!safePath || !safePath.startsWith(BUS_UPLOAD_PUBLIC_PREFIX)) return "";
+const toCloudinaryPublicId = (imageUrl) => {
+  const safeUrl = normalizeImagePath(imageUrl);
+  if (!safeUrl) return "";
 
-  const filename = path.basename(safePath);
-  if (!filename) return "";
-  return path.join(busUploadsDir, filename);
+  let parsed;
+  try {
+    parsed = new URL(safeUrl);
+  } catch {
+    return "";
+  }
+
+  if (!CLOUDINARY_HOST_RE.test(parsed.hostname || "")) return "";
+
+  const uploadMarker = "/upload/";
+  const markerIndex = parsed.pathname.indexOf(uploadMarker);
+  if (markerIndex < 0) return "";
+
+  const rawAssetPath = parsed.pathname.slice(markerIndex + uploadMarker.length);
+  const rawSegments = rawAssetPath.split("/").filter(Boolean);
+  if (rawSegments.length === 0) return "";
+
+  const versionIndex = rawSegments.findIndex((segment) => /^v\d+$/.test(segment));
+  const publicIdSegments = versionIndex >= 0
+    ? rawSegments.slice(versionIndex + 1)
+    : rawSegments;
+
+  if (publicIdSegments.length === 0) return "";
+
+  const decodedSegments = publicIdSegments.map((segment) => {
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
+  });
+
+  const lastIndex = decodedSegments.length - 1;
+  decodedSegments[lastIndex] = decodedSegments[lastIndex].replace(/\.[^./]+$/, "");
+  if (!decodedSegments[lastIndex]) return "";
+
+  return normalizeImagePath(decodedSegments.join("/"));
 };
 
 const safeDeleteBusImageByPath = async (publicPath) => {
-  const absolutePath = resolveBusImageAbsolutePath(publicPath);
-  if (!absolutePath) return;
+  const publicId = toCloudinaryPublicId(publicPath);
+  if (!publicId) return;
 
   try {
-    await fs.promises.unlink(absolutePath);
+    await cloudinary.uploader.destroy(publicId, { resource_type: "image" });
   } catch {
     // ignore cleanup failures
   }

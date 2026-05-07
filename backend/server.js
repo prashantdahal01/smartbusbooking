@@ -5,15 +5,14 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const connectDB = require("./config/db");
+const apiRoutes = require("./routes");
+const { isApiError } = require("./utils/apiError");
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// Static uploads (bus images etc.)
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Health check routes
 const sendApiHealth = (req, res) => {
@@ -24,19 +23,7 @@ app.get("/api/health", sendApiHealth);
 app.get("/api/status", sendApiHealth);
 
 // ================= ROUTES =================
-app.use("/api/auth", require("./routes/auth.routes"));
-app.use("/api/users", require("./routes/user.routes"));
-app.use("/api/districts", require("./routes/district.routes"));
-app.use("/api/routes", require("./routes/route.routes"));
-app.use("/api/stops", require("./routes/stop.routes"));
-app.use("/api/locations", require("./routes/location.routes"));
-app.use("/api/buses", require("./routes/bus.routes"));
-app.use("/api/schedules", require("./routes/schedule.routes"));
-app.use("/api/bookings", require("./routes/booking.routes"));
-app.use("/api/payments", require("./routes/payment.routes"));
-app.use("/api/seat-lock", require("./routes/seatLock.routes"));
-app.use("/api/operator", require("./routes/operator.routes"));
-app.use("/api/admin", require("./routes/admin.routes"));
+app.use("/api", apiRoutes);
 
 // ================= SERVE FRONTEND =================
 // VERY IMPORTANT: Serve Vite build files
@@ -51,6 +38,15 @@ app.get("*", (req, res) => {
 
 // ================= ERROR HANDLER =================
 app.use((err, req, res, next) => {
+  if (isApiError(err)) {
+    const status = Number.isFinite(Number(err.status)) ? Number(err.status) : 500;
+    return res.status(status).json({
+      success: false,
+      message: err.message || "Request failed",
+      data: err.data ?? null,
+    });
+  }
+
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res
@@ -64,6 +60,19 @@ app.use((err, req, res, next) => {
 
   if (typeof err?.message === "string" && /upload|image/i.test(err.message)) {
     return res.status(400).json({ message: err.message });
+  }
+
+  const cloudinaryMessage = String(err?.error?.message || err?.message || "").trim();
+  const cloudinaryHost = String(err?.request_options?.host || "").toLowerCase();
+  const isCloudinaryError = Boolean(cloudinaryMessage) && (
+    /cloudinary|cloud_name|api[\s_-]*key|signature|upload/i.test(cloudinaryMessage)
+    || cloudinaryHost.includes("cloudinary.com")
+  );
+
+  if (isCloudinaryError) {
+    const status = Number(err?.http_code);
+    const httpStatus = Number.isInteger(status) && status >= 400 && status < 600 ? status : 400;
+    return res.status(httpStatus).json({ message: `Cloudinary error: ${cloudinaryMessage}` });
   }
 
   console.error(err);

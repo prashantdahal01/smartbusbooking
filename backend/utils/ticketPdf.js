@@ -32,13 +32,14 @@ const generateTicketPdfBuffer = async (booking) => {
 		browser = await puppeteer.launch(buildLaunchOptions());
 		const page = await browser.newPage();
 
-		await page.setViewport({ width: 1240, height: 1754, deviceScaleFactor: 2 });
+		await page.setViewport({ width: 1754, height: 1240, deviceScaleFactor: 2 });
 		await page.setContent(html, {
 			waitUntil: ["domcontentloaded", "networkidle0"],
 		});
 
 		const pdfBuffer = await page.pdf({
 			format: "A4",
+			landscape: true,
 			preferCSSPageSize: true,
 			printBackground: true,
 			margin: {

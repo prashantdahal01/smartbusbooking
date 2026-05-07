@@ -9,6 +9,37 @@ const DRIVE_END_X = 5;
 const DRIVE_DURATION = 7.8;
 const CYCLE_DURATION = 12.8;
 
+const SCENE_THEME = {
+  default: {
+    background: "#90c4eb",
+    fog: "#8bb6d4",
+    ambientIntensity: 0.65,
+    directionalIntensity: 1.15,
+    hemisphereSky: "#d8ecff",
+    hemisphereGround: "#72839b",
+    hemisphereIntensity: 0.22,
+    roadColor: "#8a878f",
+    shoulderColor: "#9b98a0",
+    shadowOpacity: 0.45,
+    shadowColor: "#2f3748",
+    environmentPreset: "sunset",
+  },
+  light: {
+    background: "#cde8ff",
+    fog: "#d8edf9",
+    ambientIntensity: 1.0,
+    directionalIntensity: 1.48,
+    hemisphereSky: "#f9fdff",
+    hemisphereGround: "#b9cce0",
+    hemisphereIntensity: 0.58,
+    roadColor: "#aeb5bf",
+    shoulderColor: "#c4c9d1",
+    shadowOpacity: 0.22,
+    shadowColor: "#6e8196",
+    environmentPreset: "city",
+  },
+};
+
 const MOUNTAIN_BANDS = [
   {
     z: -8,
@@ -111,7 +142,7 @@ function MountainRange() {
   );
 }
 
-function WindingRoad() {
+function WindingRoad({ roadColor, shoulderColor }) {
   const { roadGeometry, shoulderGeometry } = useMemo(() => {
     const curve = new THREE.CatmullRomCurve3([
       new THREE.Vector3(-12, -0.72, 2.6),
@@ -132,10 +163,10 @@ function WindingRoad() {
   return (
     <group>
       <mesh geometry={shoulderGeometry} receiveShadow>
-        <meshStandardMaterial color="#9b98a0" roughness={1} metalness={0.05} />
+        <meshStandardMaterial color={shoulderColor} roughness={1} metalness={0.05} />
       </mesh>
       <mesh geometry={roadGeometry} castShadow receiveShadow>
-        <meshStandardMaterial color="#8a878f" roughness={0.95} metalness={0.08} />
+        <meshStandardMaterial color={roadColor} roughness={0.95} metalness={0.08} />
       </mesh>
     </group>
   );
@@ -237,23 +268,30 @@ function AnimatedBus({ searchHovered }) {
   );
 }
 
-function SceneContent({ searchHovered }) {
+function SceneContent({ searchHovered, lightMode }) {
+  const sceneTheme = lightMode ? SCENE_THEME.light : SCENE_THEME.default;
+
   return (
     <>
-      <color attach="background" args={["#90c4eb"]} />
-      <fog attach="fog" args={["#8bb6d4", 11, 30]} />
+      <color attach="background" args={[sceneTheme.background]} />
+      <fog attach="fog" args={[sceneTheme.fog, 11, 30]} />
 
-      <ambientLight intensity={0.65} />
+      <ambientLight intensity={sceneTheme.ambientIntensity} />
+      <hemisphereLight
+        color={sceneTheme.hemisphereSky}
+        groundColor={sceneTheme.hemisphereGround}
+        intensity={sceneTheme.hemisphereIntensity}
+      />
       <directionalLight
         castShadow
         position={[6, 8, 5]}
-        intensity={1.15}
+        intensity={sceneTheme.directionalIntensity}
         shadow-mapSize-width={1024}
         shadow-mapSize-height={1024}
       />
 
       <MountainRange />
-      <WindingRoad />
+      <WindingRoad roadColor={sceneTheme.roadColor} shoulderColor={sceneTheme.shoulderColor} />
 
       <Suspense fallback={<BusFallback searchHovered={searchHovered} />}>
         <AnimatedBus searchHovered={searchHovered} />
@@ -261,22 +299,22 @@ function SceneContent({ searchHovered }) {
 
       <ContactShadows
         position={[0, -0.78, 0.8]}
-        opacity={0.45}
+        opacity={sceneTheme.shadowOpacity}
         scale={20}
         blur={1.8}
         far={5}
         resolution={1024}
-        color="#2f3748"
+        color={sceneTheme.shadowColor}
       />
 
-      <Environment preset="sunset" />
+      <Environment preset={sceneTheme.environmentPreset} />
     </>
   );
 }
 
-export default function HimalayaHeroScene({ searchHovered }) {
+export default function HimalayaHeroScene({ searchHovered, lightMode = false, className = "" }) {
   return (
-    <div className="absolute inset-0 z-0">
+    <div className={`absolute inset-0 z-0 ${className}`}>
       <Canvas
         shadows
         dpr={[1, 1.5]}
@@ -284,7 +322,7 @@ export default function HimalayaHeroScene({ searchHovered }) {
         gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
         resize={{ scroll: false, debounce: { resize: 0, scroll: 50 } }}
       >
-        <SceneContent searchHovered={searchHovered} />
+        <SceneContent searchHovered={searchHovered} lightMode={lightMode} />
       </Canvas>
     </div>
   );

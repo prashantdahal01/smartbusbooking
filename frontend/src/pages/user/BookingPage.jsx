@@ -6,6 +6,7 @@ import BusImageGalleryModal from "../../components/seats/BusImageGalleryModal";
 import PassengerDetailsPanel from "../../components/seats/PassengerDetailsPanel";
 import SeatDeckMap from "../../components/seats/SeatDeckMap";
 import { useAuth } from "../../context/AuthContext";
+import { useRequireAuth } from "../../hooks/useRequireAuth";
 import { getSeatStatus, initiateEsewaPayment, lockSeats, unlockSeats } from "../../services/booking.service";
 import { formatCurrency, getBusImageUrl } from "../../utils/helpers";
 
@@ -136,6 +137,7 @@ export default function BookingPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { currentUser } = useAuth();
+  const { requireAuth } = useRequireAuth();
 
   const [seatStatus, setSeatStatus] = useState(null);
   const [selectedSeats, setSelectedSeats] = useState([]);
@@ -170,7 +172,7 @@ export default function BookingPage() {
     toastTimerRef.current = window.setTimeout(() => setToast(null), 3200);
   };
 
-  const redirectToLogin = (nextSelectedSeats = selectedSeats) => {
+  const persistPendingBooking = (nextSelectedSeats = selectedSeats) => {
     if (!activeScheduleId) return;
 
     try {
@@ -189,6 +191,12 @@ export default function BookingPage() {
     } catch {
       // ignore storage errors
     }
+  };
+
+  const redirectToLogin = (nextSelectedSeats = selectedSeats) => {
+    if (!activeScheduleId) return;
+
+    persistPendingBooking(nextSelectedSeats);
 
     const redirectPath = `${location.pathname || ""}${location.search || ""}`;
     navigate(`/login?redirect=${encodeURIComponent(redirectPath || `/seats/${activeScheduleId}`)}`);
@@ -539,7 +547,13 @@ export default function BookingPage() {
       const nextSeats = isSelected
         ? selectedSeatsRef.current.filter((seat) => seat !== normalizedSeatLabel)
         : normalizeSeatLabels([...selectedSeatsRef.current, normalizedSeatLabel]);
-      redirectToLogin(nextSeats);
+
+      requireAuth({
+        message: "Please log in to continue booking this seat.",
+        actionLabel: "Log In",
+        toastId: `seat-auth-required-${activeScheduleId}`,
+        onBeforeRedirect: () => persistPendingBooking(nextSeats),
+      });
       return;
     }
 
@@ -962,7 +976,12 @@ export default function BookingPage() {
     }
 
     if (!currentUser?.id) {
-      redirectToLogin(selectedSeats);
+      requireAuth({
+        message: "Please log in to continue booking.",
+        actionLabel: "Log In",
+        toastId: `booking-auth-required-${activeScheduleId}`,
+        onBeforeRedirect: () => persistPendingBooking(selectedSeats),
+      });
       return;
     }
 

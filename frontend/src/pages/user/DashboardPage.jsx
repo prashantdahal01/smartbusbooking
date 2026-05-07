@@ -11,11 +11,11 @@ import {
 	UserPen,
 	WalletCards,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import BookingCard from "../../components/BookingCard";
 import { useAuth } from "../../context/AuthContext";
-import { getMyBookings, retryEsewaPayment } from "../../services/booking.service";
+import { getMyBookings, retryEsewaPayment, verifyEsewaPayment } from "../../services/booking.service";
 import { getProfile, updateProfile } from "../../services/user.service";
 import { formatCurrency } from "../../utils/helpers";
 
@@ -40,6 +40,32 @@ const getBookingAmount = (booking) => {
 	return seatCount > 0 ? schedulePrice * seatCount : schedulePrice;
 };
 
+const findPaymentNoticeBookingId = (items, paymentToken) => {
+	const now = Date.now();
+	const normalizedToken = String(paymentToken || "").trim().toLowerCase();
+	const isRecent = (booking) => {
+		const ts = new Date(booking?.createdAt || booking?.updatedAt || 0).getTime();
+		return Number.isFinite(ts) && now - ts < 30 * 60 * 1000;
+	};
+
+	const candidates = (Array.isArray(items) ? items : []).filter(isRecent);
+	if (normalizedToken === "success") {
+		return candidates.find((booking) => String(booking?.status || "").toLowerCase() === "confirmed")?._id || "";
+	}
+
+	if (normalizedToken === "pending") {
+		return candidates.find((booking) => String(booking?.paymentStatus || booking?.payment?.status || "").toLowerCase() === "pending")?._id || "";
+	}
+
+	if (["failure", "error", "expired"].includes(normalizedToken)) {
+		return candidates.find((booking) => String(booking?.paymentStatus || booking?.payment?.status || "").toLowerCase() === "failed")?._id
+			|| candidates.find((booking) => String(booking?.status || "").toLowerCase() === "payment_failed")?._id
+			|| "";
+	}
+
+	return "";
+};
+
 export default function DashboardPage() {
 	const [searchParams, setSearchParams] = useSearchParams();
 	const { currentUser, refreshMe } = useAuth();
@@ -54,6 +80,11 @@ export default function DashboardPage() {
 	const [bookingActionMessage, setBookingActionMessage] = useState(null);
 	const [retryingBookingId, setRetryingBookingId] = useState("");
 	const [bookingNowMs, setBookingNowMs] = useState(() => Date.now());
+	const [paymentNotice, setPaymentNotice] = useState(null);
+	const [paymentCopyStatus, setPaymentCopyStatus] = useState("");
+	const verifyTimerRef = useRef(null);
+	const verifyAttemptsRef = useRef(0);
+	const verifyingBookingRef = useRef("");
 
 	const [name, setName] = useState("");
 	const [phone, setPhone] = useState("");
@@ -80,6 +111,112 @@ export default function DashboardPage() {
 
 		setActiveView(queryView);
 	}, [queryView, setSearchParams]);
+
+	const paymentToken = String(searchParams.get("payment") || "").trim().toLowerCase();
+	const paymentBookingId = String(searchParams.get("bookingId") || "").trim();
+
+	useEffect(() => {
+		if (activeView !== "bookings") return;
+		if (!paymentToken) {
+			setPaymentNotice(null);
+			return;
+		}
+
+		const noticeByToken = {
+			success: {
+				type: "success",
+				title: "Payment successful",
+				message: "Your booking is confirmed and your ticket is ready.",
+			},
+			pending: {
+				type: "warning",
+				title: "Payment pending",
+				message: "Your payment is still processing. We will verify it automatically.",
+			},
+			failure: {
+				type: "error",
+				title: "Payment failed",
+				message: "We could not confirm the payment. Keep this bookingId to investigate or retry.",
+			},
+			expired: {
+				type: "error",
+				title: "Payment expired",
+				message: "Seat hold expired before payment completion. Please book again.",
+			},
+			error: {
+				type: "error",
+				title: "Payment error",
+				message: "A payment error occurred. Please retry or contact support with the bookingId.",
+			},
+		};
+
+		const nextNotice = noticeByToken[paymentToken] || null;
+		setPaymentNotice(nextNotice ? { ...nextNotice, bookingId: paymentBookingId } : null);
+		setPaymentCopyStatus("");
+		// eslint-disable-next-line no-void
+		void loadBookings();
+	}, [activeView, paymentToken, paymentBookingId]);
+
+	useEffect(() => {
+		if (!paymentNotice || paymentNotice.bookingId || !bookings.length || !paymentToken) return;
+		const fallbackId = findPaymentNoticeBookingId(bookings, paymentToken);
+		if (!fallbackId) return;
+		setPaymentNotice((prev) => (prev ? { ...prev, bookingId: fallbackId } : prev));
+	}, [bookings, paymentNotice, paymentToken]);
+
+	useEffect(() => {
+		if (activeView !== "bookings") return undefined;
+		if (paymentToken !== "pending" || !paymentNotice?.bookingId) return undefined;
+
+		const bookingId = String(paymentNotice.bookingId || "").trim();
+		if (!bookingId) return undefined;
+		if (verifyingBookingRef.current === bookingId) return undefined;
+
+		verifyingBookingRef.current = bookingId;
+		verifyAttemptsRef.current = 0;
+
+		const maxAttempts = 6;
+		const intervalMs = 5000;
+
+		const stopPolling = () => {
+			if (verifyTimerRef.current) {
+				window.clearInterval(verifyTimerRef.current);
+				verifyTimerRef.current = null;
+			}
+			verifyingBookingRef.current = "";
+		};
+
+		const runCheck = async () => {
+			if (!verifyingBookingRef.current) return;
+			verifyAttemptsRef.current += 1;
+			try {
+				const result = await verifyEsewaPayment({ bookingId });
+				const bookingStatus = String(result?.bookingStatus || "").toLowerCase();
+				const paymentStatus = String(result?.paymentStatus || "").toLowerCase();
+				if (["confirmed", "cancelled"].includes(bookingStatus) || ["paid", "failed"].includes(paymentStatus)) {
+					stopPolling();
+				}
+			} catch {
+				if (verifyAttemptsRef.current >= maxAttempts) {
+					stopPolling();
+				}
+			} finally {
+				// eslint-disable-next-line no-void
+				void loadBookings();
+			}
+
+			if (verifyAttemptsRef.current >= maxAttempts) {
+				stopPolling();
+			}
+		};
+
+		void runCheck();
+		verifyTimerRef.current = window.setInterval(runCheck, intervalMs);
+
+		return () => {
+			stopPolling();
+		};
+	}, [activeView, paymentNotice?.bookingId, paymentToken]);
 
 	useEffect(() => {
 		localStorage.setItem(SETTINGS_KEY, JSON.stringify(prefs));
@@ -159,6 +296,30 @@ export default function DashboardPage() {
 		} finally {
 			setRetryingBookingId("");
 		}
+	};
+
+	const onCopyPaymentBookingId = async () => {
+		if (!paymentNotice?.bookingId) return;
+		try {
+			await navigator.clipboard.writeText(paymentNotice.bookingId);
+			setPaymentCopyStatus("Copied");
+			window.setTimeout(() => setPaymentCopyStatus(""), 1500);
+		} catch {
+			setPaymentCopyStatus("Copy failed");
+			window.setTimeout(() => setPaymentCopyStatus(""), 1500);
+		}
+	};
+
+	const onDismissPaymentNotice = () => {
+		setPaymentNotice(null);
+		setPaymentCopyStatus("");
+		const nextParams = new URLSearchParams(searchParams);
+		nextParams.delete("payment");
+		nextParams.delete("bookingId");
+		if (!nextParams.get("view")) {
+			nextParams.set("view", "bookings");
+		}
+		setSearchParams(nextParams, { replace: true });
 	};
 
 	const loadProfile = async () => {
@@ -249,6 +410,48 @@ export default function DashboardPage() {
 
 			{activeView === "bookings" ? (
 				<div className="mt-4 space-y-4">
+					{paymentNotice ? (
+						<div
+							className={`rounded-2xl border px-4 py-3 text-sm shadow-sm sm:px-5 sm:py-4 ${
+								paymentNotice.type === "success"
+									? "border-emerald-200 bg-emerald-50 text-emerald-700"
+									: paymentNotice.type === "warning"
+										? "border-amber-200 bg-amber-50 text-amber-700"
+										: "border-rose-200 bg-rose-50 text-rose-700"
+							}`}
+						>
+							<div className="flex flex-wrap items-start justify-between gap-3">
+								<div>
+									<p className="text-base font-semibold">{paymentNotice.title}</p>
+									<p className="mt-1 text-sm">{paymentNotice.message}</p>
+									{paymentNotice.bookingId ? (
+										<p className="mt-2 text-xs font-semibold uppercase tracking-wide">
+											Booking ID: <span className="normal-case font-semibold">{paymentNotice.bookingId}</span>
+										</p>
+									) : null}
+								</div>
+
+								<div className="flex flex-wrap items-center gap-2">
+									{paymentNotice.bookingId ? (
+										<button
+											type="button"
+											onClick={onCopyPaymentBookingId}
+											className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:border-slate-400"
+										>
+											{paymentCopyStatus || "Copy bookingId"}
+										</button>
+									) : null}
+									<button
+										type="button"
+										onClick={onDismissPaymentNotice}
+										className="rounded-lg border border-transparent px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:text-slate-900"
+									>
+										Dismiss
+									</button>
+								</div>
+							</div>
+						</div>
+					) : null}
 					<div className="rounded-2xl border border-slate-200 bg-linear-to-r from-violet-50 via-white to-purple-50 p-4 shadow-sm sm:p-5">
 						<div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 							<div>

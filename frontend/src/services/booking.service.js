@@ -117,6 +117,11 @@ export async function retryEsewaPayment({ bookingId }) {
 	return res.data;
 }
 
+export async function verifyEsewaPayment({ bookingId }) {
+	const res = await axiosInstance.post("/payments/esewa/verify", { bookingId });
+	return res.data;
+}
+
 export async function getMyBookings() {
 	const res = await axiosInstance.get("/bookings");
 	return res.data;

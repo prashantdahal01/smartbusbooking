@@ -1,6 +1,6 @@
-const fs = require("fs");
-const path = require("path");
 const multer = require("multer");
+const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const cloudinary = require("../config/cloudinary");
 
 const BUS_IMAGE_FIELD_TO_CATEGORY = {
 	busImage: "bus",
@@ -25,28 +25,17 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
 
 const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 
-function ensureDir(dirPath) {
-	try {
-		fs.mkdirSync(dirPath, { recursive: true });
-	} catch {
-		// ignore
-	}
-}
-
-const busUploadsDir = path.join(__dirname, "..", "uploads", "buses");
-ensureDir(busUploadsDir);
-
-const storage = multer.diskStorage({
-	destination: (req, file, cb) => {
-		ensureDir(busUploadsDir);
-		cb(null, busUploadsDir);
-	},
-	filename: (req, file, cb) => {
-		const ext = path.extname(file.originalname || "").toLowerCase();
-		const safeExt = ALLOWED_IMAGE_EXTENSIONS.has(ext) ? ext : "";
+const storage = new CloudinaryStorage({
+	cloudinary,
+	params: (req, file) => {
 		const category = BUS_IMAGE_FIELD_TO_CATEGORY[file.fieldname] || "misc";
 		const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-		cb(null, `bus-${category}-${unique}${safeExt}`);
+		return {
+			folder: "bus_images",
+			allowed_formats: ["jpg", "jpeg", "png", "webp"],
+			public_id: `bus-${category}-${unique}`,
+			resource_type: "image",
+		};
 	},
 });
 
@@ -57,7 +46,9 @@ function imageFileFilter(req, file, cb) {
 		return cb(new Error("Invalid upload field for bus image"));
 	}
 
-	const ext = path.extname(file.originalname || "").toLowerCase();
+	const originalName = String(file.originalname || "");
+	const extIndex = originalName.lastIndexOf(".");
+	const ext = extIndex >= 0 ? originalName.slice(extIndex).toLowerCase() : "";
 	const isValidMimeType = ALLOWED_IMAGE_MIME_TYPES.has(String(file.mimetype || "").toLowerCase());
 	const isValidExtension = ALLOWED_IMAGE_EXTENSIONS.has(ext);
 

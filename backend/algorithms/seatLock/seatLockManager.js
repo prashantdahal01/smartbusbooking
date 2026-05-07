@@ -175,7 +175,7 @@ const lockSeats = async ({ scheduleId, seats, userId, sessionId } = {}) => {
         {
           upsert: true,
           new: true,
-          rawResult: true,
+          includeResultMetadata: true,
           setDefaultsOnInsert: true,
         }
       );

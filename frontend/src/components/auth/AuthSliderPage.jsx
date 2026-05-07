@@ -24,6 +24,8 @@ export default function AuthSliderPage({ initialMode = "signin" }) {
   const [signUpPassword, setSignUpPassword] = useState("");
   const [signUpError, setSignUpError] = useState("");
   const [signUpLoading, setSignUpLoading] = useState(false);
+  const redirectQueryValue = new URLSearchParams(location.search).get("redirect");
+  const safeRedirectPath = redirectQueryValue && redirectQueryValue.startsWith("/") ? redirectQueryValue : "";
 
   useEffect(() => {
     setMode(normalizeMode(initialMode));
@@ -46,7 +48,7 @@ export default function AuthSliderPage({ initialMode = "signin" }) {
 
   if (token && role === "admin") return <Navigate to="/admin" replace />;
   if (token && role === "operator") return <Navigate to="/operator/dashboard" replace />;
-  if (token && role === "customer") return <Navigate to="/search" replace />;
+  if (token && role === "customer") return <Navigate to={safeRedirectPath || "/search"} replace />;
 
   const switchMode = (nextMode) => {
     const safeMode = normalizeMode(nextMode);
@@ -61,11 +63,10 @@ export default function AuthSliderPage({ initialMode = "signin" }) {
 
     try {
       const user = await login(signInEmail.trim(), signInPassword, { persist: rememberSession });
-      const redirect = new URLSearchParams(location.search).get("redirect");
 
       if (user.role === "admin") navigate("/admin");
       else if (user.role === "operator") navigate("/operator/dashboard");
-      else if (redirect && redirect.startsWith("/")) navigate(redirect);
+      else if (safeRedirectPath) navigate(safeRedirectPath);
       else navigate("/search");
     } catch (error) {
       setSignInError(error?.response?.data?.message || error?.message || "Sign in failed");

@@ -1,11 +1,12 @@
 const express = require("express");
 const router = express.Router();
 
-const { verifyToken } = require("../middleware/auth.middleware");
-const { authorizeRoles } = require("../middleware/role.middleware");
-const { uploadBusImages, busImageUploadFields } = require("../middleware/upload.middleware");
+const { verifyToken } = require("../../middleware/auth.middleware");
+const { authorizeRoles } = require("../../middleware/role.middleware");
+const { uploadBusImages, busImageUploadFields } = require("../../middleware/upload.middleware");
 
-const admin = require("../controllers/admin.controller");
+const admin = require("./admin.controller");
+const busController = require("../bus/bus.controller");
 
 router.use(verifyToken, authorizeRoles("admin"));
 
@@ -23,10 +24,10 @@ router.get("/bookings", admin.getAdminBookings);
 router.patch("/bookings/:id/cancel", admin.cancelBookingByAdmin);
 
 // Bus
-router.post("/bus", uploadBusImages.fields(busImageUploadFields), admin.createBus);
-router.get("/bus", admin.getBuses);
-router.put("/bus/:id", uploadBusImages.fields(busImageUploadFields), admin.updateBus);
-router.delete("/bus/:id", admin.deleteBus);
+router.post("/bus", uploadBusImages.fields(busImageUploadFields), busController.createBus);
+router.get("/bus", busController.getBuses);
+router.put("/bus/:id", uploadBusImages.fields(busImageUploadFields), busController.updateBus);
+router.delete("/bus/:id", busController.deleteBus);
 
 // Route
 router.post("/route", admin.createRoute);
