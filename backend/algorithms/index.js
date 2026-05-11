@@ -22,4 +22,5 @@ module.exports = {
 	filterSchedulesBySegment,
 	matchRouteSegment,
 	buildOrderedRoutePath,
+	searchService: require("./search").searchService,
 };

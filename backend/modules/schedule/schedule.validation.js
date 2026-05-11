@@ -2,7 +2,9 @@ const Joi = require("joi");
 
 const searchSchema = Joi.object({
   source: Joi.string().trim(),
+  from: Joi.string().trim(),
   destination: Joi.string().trim(),
+  to: Joi.string().trim(),
   date: Joi.string().trim(),
   travelDate: Joi.string().trim(),
   includeRoutePlan: Joi.any(),

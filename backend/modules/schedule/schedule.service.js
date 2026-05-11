@@ -378,66 +378,16 @@ const laneCoverageMissing = ({ schedulePoints, routeLanePoints }) => {
 };
 
 /**
- * Search schedules, with optional route plan.
- * @param {object} params
- * @param {object} params.query
- * @returns {Promise<object|object[]>} 
+ * Delegate schedule search to the dedicated search algorithm module.
  */
-const searchSchedules = async ({ query }) => {
+const { searchService } = require("../../algorithms/search");
+
+const searchSchedules = async ({ query } = {}) => {
   try {
-    const { source, destination, date, travelDate } = query || {};
-    const requestedDateValue = date ?? travelDate;
-    const includeRoutePlan = shouldIncludeRoutePlan(query?.includeRoutePlan);
-    const sourceText = normalizeText(source);
-    const destinationText = normalizeText(destination);
-    const shouldApplySegmentFilter = Boolean(sourceText || destinationText);
-    const todayDateKey = getTodayDateKey();
-    const filter = { isActive: { $ne: false } };
-
-    if (requestedDateValue !== undefined) {
-      const requestedDate = normalizeText(requestedDateValue);
-      if (!isValidDateYYYYMMDD(requestedDate)) {
-        throw new ApiError(400, "date must be in YYYY-MM-DD format", null);
-      }
-      filter.date = requestedDate;
-    }
-
-    const schedules = await Schedule.find(filter)
-      .populate({
-        path: "bus",
-        match: { isActive: true },
-        populate: { path: "operator", select: "name email" },
-      })
-      .populate("route");
-
-    const validSchedules = schedules.filter((schedule) => {
-      if (!schedule?.bus) return false;
-      const scheduleDateKey = normalizeText(schedule?.date);
-      if (!isValidDateYYYYMMDD(scheduleDateKey)) return false;
-      return scheduleDateKey >= todayDateKey;
-    });
-
-    const compatibleSchedules = shouldApplySegmentFilter
-      ? await routeSegmentService.filterSchedulesBySegment(validSchedules, sourceText, destinationText, {
-        requireBoth: false,
-        allowPartial: true,
-      })
-      : routeSegmentService.normalizeSchedulesForOutput(validSchedules);
-
-    if (!includeRoutePlan) {
-      return compatibleSchedules;
-    }
-
-    const routePlan = await routePlanningService.getRoutePlan({
-      source: sourceText,
-      destination: destinationText,
-      requireBoth: false,
-    });
-    return { schedules: compatibleSchedules, routePlan };
+    return await searchService.searchSchedules({ query });
   } catch (e) {
-    if (routeSegmentService.isRouteSegmentError(e)) {
-      const { statusCode, payload } = routeSegmentService.formatError(e);
-      throw new ApiError(statusCode, payload?.message || "Route segment error", payload);
+    if (e && e.status && e.message && e.code) {
+      throw new ApiError(e.status, e.message, { code: e.code });
     }
     throw e;
   }

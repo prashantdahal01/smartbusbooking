@@ -16,8 +16,12 @@ const validate = (schema, payload) => {
 
 exports.searchSchedules = async (req, res) => {
   try {
-    validate(searchSchema, req.query || {});
-    const data = await scheduleService.searchSchedules({ query: req.query });
+    const query = req.query || {};
+    // Add from/to compatibility mapping
+    if (query.from && !query.source) query.source = query.from;
+    if (query.to && !query.destination) query.destination = query.to;
+    validate(searchSchema, query);
+    const data = await scheduleService.searchSchedules({ query });
     return res.json(data);
   } catch (error) {
     return handleControllerErrorRaw(res, error);

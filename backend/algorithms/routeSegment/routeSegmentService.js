@@ -192,3 +192,15 @@ module.exports = {
 	RouteSegmentServiceError,
 	routeSegmentService,
 };
+
+// Convenience helper to validate a single route for forward match only.
+routeSegmentService.isValidSegment = async (route, source, destination, options = {}) => {
+	try {
+		const normalizedSource = String(source || "").trim();
+		const normalizedDestination = String(destination || "").trim();
+		const result = await matchRouteSegment(route, normalizedSource, normalizedDestination, options);
+		return Boolean(result && result.isMatch && result.direction === "forward");
+	} catch (error) {
+		throw toServiceError(error);
+	}
+};
