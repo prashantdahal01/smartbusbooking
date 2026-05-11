@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 
-const Booking = require("../../models/Booking");
-const SeatLock = require("../../models/SeatLock");
+const { Booking } = require("../../modules/booking/booking.model");
+const { SeatLock } = require("../../modules/seatLock/seatLock.model");
 const { removeExpiredLocks } = require("./lockCleanup");
 const {
   SeatLockValidationError,

@@ -94,19 +94,27 @@ const normalizeDistrict = (district) => {
     : Array.isArray(district.populatedCities)
     ? district.populatedCities
     : Array.isArray(district.cities)
-    ? district.cities.map((cityName) => {
-        const name = String(cityName || "").trim();
-        return {
-          _id: `${normalizeKey(district._id || district.name)}-${normalizeKey(name)}`,
-          name,
-          key: normalizeKey(name),
-          district: {
-            _id: district._id,
-            name: district.name,
-            key: district.key || normalizeKey(district.name),
-          },
-        };
-      })
+    ? district.cities
+        .map((cityOrString) => {
+          // If it's already an object with _id, use it
+          if (typeof cityOrString === "object" && cityOrString?._id) {
+            return cityOrString;
+          }
+          // If it's just a string, don't create fake _id (backend should provide proper objects)
+          const name = String(typeof cityOrString === "string" ? cityOrString : cityOrString?.name || "").trim();
+          if (!name) return null;
+          // Return without _id - it will cause issues if user tries to edit/delete
+          return {
+            name,
+            key: normalizeKey(name),
+            district: {
+              _id: district._id,
+              name: district.name,
+              key: district.key || normalizeKey(district.name),
+            },
+          };
+        })
+        .filter(Boolean)
     : [];
 
   return {
@@ -114,6 +122,7 @@ const normalizeDistrict = (district) => {
     name: String(district.name || "").trim(),
     key: String(district.key || normalizeKey(district.name)),
     cityObjects,
+    populatedCities: cityObjects,
     cities: cityObjects.map((city) => city.name),
   };
 };

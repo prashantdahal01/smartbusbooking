@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const connectDB = require("../config/db");
-const Route = require("../models/Route");
+const { Route } = require("../modules/route/route.model");
 const { syncRoutePoints } = require("../services/routePointSync.service");
 
 const run = async () => {

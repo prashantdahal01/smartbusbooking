@@ -1127,22 +1127,43 @@ const sortRoutePoints = (points) =>
   });
 
 const buildCityLookupByKey = async (names) => {
-  const keys = Array.from(new Set((Array.isArray(names) ? names : [])
-    .map((name) => stopKey(name))
-    .filter(Boolean)));
+  const normalizedNames = Array.from(
+    new Set(
+      (Array.isArray(names) ? names : [])
+        .map((name) => normalizeText(name))
+        .filter(Boolean)
+    )
+  );
+  const keys = Array.from(new Set(normalizedNames.map((name) => stopKey(name)).filter(Boolean)));
 
-  if (keys.length === 0) return new Map();
+  if (keys.length === 0 && normalizedNames.length === 0) return new Map();
 
-  const cities = await City.find({ key: { $in: keys } })
+  const nameClauses = normalizedNames.map((name) => ({
+    name: { $regex: new RegExp(`^${escapeRegex(name)}$`, "i") },
+  }));
+  const query = nameClauses.length > 0
+    ? { $or: [{ key: { $in: keys } }, ...nameClauses] }
+    : { key: { $in: keys } };
+
+  const cities = await City.find(query)
     .populate("district", "_id name key")
     .select("_id name key district")
     .lean();
 
   const map = new Map();
   cities.forEach((city) => {
-    const key = stopKey(city?.key || city?.name);
-    if (!key || map.has(key)) return;
-    map.set(key, city);
+    const indexKeys = Array.from(
+      new Set([
+        stopKey(city?.key),
+        stopKey(city?.name),
+        stopKey(normalizeText(city?.name)),
+      ].filter(Boolean))
+    );
+    indexKeys.forEach((key) => {
+      if (!map.has(key)) {
+        map.set(key, city);
+      }
+    });
   });
   return map;
 };

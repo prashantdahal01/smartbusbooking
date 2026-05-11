@@ -2,8 +2,8 @@ require("dotenv").config();
 
 const mongoose = require("mongoose");
 const connectDB = require("../config/db");
-const Bus = require("../models/Bus");
-const Schedule = require("../models/Schedule");
+const { Bus } = require("../modules/bus/bus.model");
+const { Schedule } = require("../modules/schedule/schedule.model");
 
 const run = async () => {
   try {

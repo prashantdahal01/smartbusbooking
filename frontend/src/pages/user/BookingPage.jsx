@@ -93,6 +93,12 @@ const normalizeGender = (value) => {
   return "";
 };
 
+const isValidOptionalEmail = (value) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return true;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized);
+};
+
 const validateContact = ({ name, phone }) => {
   const normalizedName = String(name || "").trim();
   const digits = String(phone || "").replace(/\D/g, "");
@@ -149,6 +155,7 @@ export default function BookingPage() {
 
   const [contactName, setContactName] = useState("");
   const [contactPhone, setContactPhone] = useState("");
+  const [contactEmail, setContactEmail] = useState("");
   const [seatPassengers, setSeatPassengers] = useState({});
 
   const [boardingPoint, setBoardingPoint] = useState("");
@@ -184,6 +191,7 @@ export default function BookingPage() {
         contact: {
           name: contactName,
           phone: contactPhone,
+          email: contactEmail,
         },
         seatPassengers,
       };
@@ -465,6 +473,7 @@ export default function BookingPage() {
       const contact = pending.contact || {};
       if (contact.name) setContactName(String(contact.name));
       if (contact.phone) setContactPhone(String(contact.phone));
+      if (contact.email) setContactEmail(String(contact.email));
 
       if (pending.boardingPoint) setBoardingPoint(String(pending.boardingPoint));
       if (pending.droppingPoint) setDroppingPoint(String(pending.droppingPoint));
@@ -492,6 +501,7 @@ export default function BookingPage() {
           gender: normalizeGender(existing.gender) || "",
           age: existing.age || "",
           idNumber: existing.idNumber || "",
+          idType: existing.idType || "",
         };
       });
       return next;
@@ -600,6 +610,7 @@ export default function BookingPage() {
   const handleContactChange = (field, value) => {
     if (field === "name") setContactName(value);
     if (field === "phone") setContactPhone(value);
+    if (field === "email") setContactEmail(value);
 
     setSeatPassengers((prev) => {
       if (!selectedSeats.length) return prev;
@@ -678,7 +689,10 @@ export default function BookingPage() {
       .filter((point) => point.name)
       .map((point, idx) => ({
         ...point,
-        idx: Number.isFinite(point.order) ? point.order - 1 : boardingMaxIdx + idx + 1,
+        // Ensure dropping point indices always come after boarding indices.
+        // If the dropping point has an explicit order, offset it by boardingMaxIdx
+        // so indices are in the same sequence space as boarding points.
+        idx: Number.isFinite(point.order) ? (boardingMaxIdx + (point.order - 1)) : (boardingMaxIdx + idx + 1),
       }))
       .sort((a, b) => a.idx - b.idx || a.name.localeCompare(b.name));
   }, [boardingOptions, schedule?.droppingPoints]);
@@ -877,6 +891,8 @@ export default function BookingPage() {
     });
   }, [contactName, contactPhone, seatPassengers, selectedSeats]);
 
+  const contactEmailError = contactEmail && !isValidOptionalEmail(contactEmail) ? "Enter a valid email address" : "";
+
   const busImage = getBusImageUrl(schedule?.bus, "bus");
   const seatLayoutImage = getBusImageUrl(schedule?.bus, "seatLayout");
   const sleeperLayoutImage = getBusImageUrl(schedule?.bus, "sleeperLayout");
@@ -956,13 +972,19 @@ export default function BookingPage() {
       return;
     }
 
-    if (selectedDropping.idx <= selectedBoarding.idx) {
-      showToast("error", "Dropping point must be after boarding point");
-      return;
-    }
-
+    // Prefer index-based check, but fall back to schedule times for routes
+    // where indices may not line up due to mixed ordering. This prevents
+    // false negatives (e.g., Damak) while still validating sequence.
     const boardingMs = parseIsoDateTimeMs(selectedBoarding.date, selectedBoarding.time);
     const droppingMs = parseIsoDateTimeMs(selectedDropping.date, selectedDropping.time);
+
+    if (selectedDropping.idx <= selectedBoarding.idx) {
+      // Allow if schedule times clearly indicate dropping is after boarding.
+      if (!Number.isFinite(boardingMs) || !Number.isFinite(droppingMs) || droppingMs <= boardingMs) {
+        showToast("error", "Dropping point must be after boarding point");
+        return;
+      }
+    }
 
     if (!Number.isFinite(boardingMs) || !Number.isFinite(droppingMs) || droppingMs <= boardingMs) {
       showToast("error", "Invalid boarding and dropping schedule times");
@@ -972,6 +994,11 @@ export default function BookingPage() {
     const contactValidation = validateContact({ name: contactName, phone: contactPhone });
     if (!contactValidation.ok) {
       showToast("error", contactValidation.message);
+      return;
+    }
+
+    if (contactEmail && !isValidOptionalEmail(contactEmail)) {
+      showToast("error", "Enter a valid email address");
       return;
     }
 
@@ -1305,8 +1332,11 @@ export default function BookingPage() {
             <PassengerDetailsPanel
               selectedSeats={selectedSeats}
               seatPassengers={seatPassengers}
+              selectedSeatDetails={selectedSeatDetails}
               contactName={contactName}
               contactPhone={contactPhone}
+              contactEmail={contactEmail}
+              contactEmailError={contactEmailError}
               onContactChange={handleContactChange}
               onSeatPassengerChange={handleSeatPassengerChange}
               boardingOptions={boardingOptions}

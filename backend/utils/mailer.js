@@ -104,9 +104,6 @@ exports.sendTicketEmailSafely = async (booking) => {
 
 		return true;
 	} catch (e) {
-		// eslint-disable-next-line no-console
-		console.error("Ticket email failed", e);
-
 		// Provide actionable hints for the most common misconfiguration: Gmail SMTP.
 		const provider = safeString(process.env.SMTP_PROVIDER).trim().toLowerCase();
 		const responseCode = Number(e?.responseCode || 0);
@@ -126,7 +123,13 @@ exports.sendTicketEmailSafely = async (booking) => {
 				// eslint-disable-next-line no-console
 				console.error("Both SMTP_PASS and SMTP_PASSWORD are set but different; clear one to avoid using the wrong password.");
 			}
+
+			// Expected failure when Gmail credentials are not accepted; keep booking flow intact.
+			return false;
 		}
+
+		// eslint-disable-next-line no-console
+		console.error("Ticket email failed", e);
 		return false;
 	}
 };

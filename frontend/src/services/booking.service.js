@@ -104,32 +104,32 @@ export async function unlockSeats({ scheduleId, seats }) {
 
 export async function createBooking({ scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint }) {
 	const res = await axiosInstance.post("/bookings", { scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint });
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 export async function initiateEsewaPayment({ scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint }) {
 	const res = await axiosInstance.post("/payments/esewa/initiate", { scheduleId, seats, passenger, passengers, boardingPoint, droppingPoint });
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 export async function retryEsewaPayment({ bookingId }) {
 	const res = await axiosInstance.post("/payments/esewa/retry", { bookingId });
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 export async function verifyEsewaPayment({ bookingId }) {
 	const res = await axiosInstance.post("/payments/esewa/verify", { bookingId });
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 export async function getMyBookings() {
 	const res = await axiosInstance.get("/bookings");
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 export async function getBookingById(id) {
 	const res = await axiosInstance.get(`/bookings/${id}`);
-	return res.data;
+	return res.data?.data ?? res.data;
 }
 
 const resolveDownloadFilename = (headers, fallback) => {

@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const SeatLock = require("../../models/SeatLock");
+const { SeatLock } = require("../../modules/seatLock/seatLock.model");
 const { normalizeSeats } = require("./seatLockValidator");
 
 const toObjectIdIfValid = (value) => {

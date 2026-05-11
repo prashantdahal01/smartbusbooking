@@ -5,7 +5,7 @@ const { Booking, Schedule } = require("./payment.model");
 const { seatLockService } = require("../../algorithms/seatLock");
 const { sendTicketEmailSafely } = require("../../utils/mailer");
 const { createAdminNotification } = require("../../services/notification.service");
-const { buildRouteOrderIndex } = require("../../utils/routePoints");
+const { buildRouteOrderIndex, normalizeKey } = require("../../utils/routePoints");
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
@@ -375,23 +375,16 @@ const initiateEsewaPayment = async ({ userId, body }) => {
     throw new ApiError(400, "Invalid dropping point", null);
   }
 
-  const boardingOrder = Number(selectedBoardingPoint?.order);
-  const droppingOrder = Number(selectedDroppingPoint?.order);
-
-  if (Number.isFinite(boardingOrder) && Number.isFinite(droppingOrder)) {
-    if (droppingOrder <= boardingOrder) {
-      throw new ApiError(400, "Dropping point must be after boarding point", null);
-    }
-  } else {
-    const routeOrderIndex = buildRouteOrderIndex(schedule.route || {});
-    const bIdx = routeOrderIndex.get(stopKey(selectedBoardingPoint.name));
-    const dIdx = routeOrderIndex.get(stopKey(selectedDroppingPoint.name));
-    if (bIdx === undefined || dIdx === undefined) {
-      throw new ApiError(400, "Selected points must exist in the route stop list", null);
-    }
-    if (dIdx <= bIdx) {
-      throw new ApiError(400, "Dropping point must be after boarding point", null);
-    }
+  const routeOrderIndex = buildRouteOrderIndex(schedule.route || {});
+  const bIdx = routeOrderIndex.get(normalizeKey(selectedBoardingPoint.name))
+    ?? routeOrderIndex.get(stopKey(selectedBoardingPoint.name));
+  const dIdx = routeOrderIndex.get(normalizeKey(selectedDroppingPoint.name))
+    ?? routeOrderIndex.get(stopKey(selectedDroppingPoint.name));
+  if (bIdx === undefined || dIdx === undefined) {
+    throw new ApiError(400, "Selected points must exist in the route stop list", null);
+  }
+  if (dIdx <= bIdx) {
+    throw new ApiError(400, "Dropping point must be after boarding point", null);
   }
 
   const boardingMs = parseIsoDateTimeMs(selectedBoardingPoint.date, selectedBoardingPoint.time);

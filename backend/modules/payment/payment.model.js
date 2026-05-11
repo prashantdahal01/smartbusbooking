@@ -1,5 +1,5 @@
-const Booking = require("../../models/Booking");
-const Schedule = require("../../models/Schedule");
+const { Booking } = require("../booking/booking.model");
+const { Schedule } = require("../schedule/schedule.model");
 
 module.exports = {
   Booking,

@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const Route = require("../../models/Route");
+const { Route } = require("../../modules/route/route.model");
 const districtDataService = require("../../services/districtData.service");
 const { routePlanningService } = require("./index");
 

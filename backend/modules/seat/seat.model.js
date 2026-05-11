@@ -1,7 +1,7 @@
-const SeatLock = require("../../models/SeatLock");
-const Booking = require("../../models/Booking");
-const Schedule = require("../../models/Schedule");
-const Bus = require("../../models/Bus");
+const { SeatLock } = require("../seatLock/seatLock.model");
+const { Booking } = require("../booking/booking.model");
+const { Schedule } = require("../schedule/schedule.model");
+const { Bus } = require("../bus/bus.model");
 
 module.exports = {
   SeatLock,

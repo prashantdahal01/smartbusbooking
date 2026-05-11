@@ -1,4 +1,4 @@
-const District = require("../models/District");
+const { District } = require("../modules/district/district.model");
 
 const normalizeKey = (s) => String(s || "").trim().toLowerCase();
 

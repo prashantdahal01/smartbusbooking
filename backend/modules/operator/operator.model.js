@@ -1,6 +1,6 @@
-const Bus = require("../../models/Bus");
-const Schedule = require("../../models/Schedule");
-const Booking = require("../../models/Booking");
+const { Bus } = require("../bus/bus.model");
+const { Schedule } = require("../schedule/schedule.model");
+const { Booking } = require("../booking/booking.model");
 
 module.exports = {
   Bus,

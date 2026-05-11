@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Building2, Plus, Trash2, X } from "lucide-react";
+import { addCityToDistrict, updateCity, deleteCity } from "../../../services/admin.service";
 
 const normalizeKey = (value) => String(value || "").trim().toLowerCase();
 
 const getInitialState = (mode, district) => ({
   name: String(district?.name || ""),
-  cities: mode === "create" ? [""] : [],
+  cities:
+    mode === "create"
+      ? [""]
+      : Array.isArray(district?.cityObjects)
+      ? district.cityObjects.map((c) => ({ _id: c._id, name: c.name, key: c.key }))
+      : Array.isArray(district?.populatedCities)
+      ? district.populatedCities.map((c) => ({ _id: c._id, name: c.name, key: c.key }))
+      : [],
 });
 
 export default function DistrictModal({
@@ -70,7 +78,65 @@ export default function DistrictModal({
       return;
     }
 
+    // Edit mode: perform city-level API actions before updating district name
+    if (mode === "edit") {
+      (async () => {
+        try {
+          await applyCityChanges(district?._id);
+          onSubmit({ name });
+        } catch (e) {
+          const message = e?.response?.data?.message || e?.message || "Failed to save cities";
+          setError(message);
+        }
+      })();
+      return;
+    }
+
     onSubmit({ name });
+  };
+
+  // Helpers for edit-mode city actions
+  const handleAddCityRow = () => {
+    setForm((prev) => ({ ...prev, cities: [...prev.cities, { name: "", _new: true }] }));
+  };
+
+  const handleCityNameChange = (index, value) => {
+    setForm((prev) => ({ ...prev, cities: prev.cities.map((c, i) => (i === index ? { ...(typeof c === "string" ? { name: c } : c), name: value, _modified: true } : c)) }));
+  };
+
+  const handleRemoveCityRow = async (index) => {
+    const item = form.cities[index];
+    if (!item) return;
+    // If existing city with id, call deleteCity
+    if (item._id) {
+      try {
+        await deleteCity(district?._id, item._id);
+      } catch (e) {
+        setError(e?.response?.data?.message || e?.message || "Failed to delete city");
+        return;
+      }
+    }
+
+    setForm((prev) => ({ ...prev, cities: prev.cities.filter((_, i) => i !== index) }));
+  };
+
+  const applyCityChanges = async (districtId) => {
+    if (!districtId) return;
+    const cities = Array.isArray(form.cities) ? form.cities : [];
+    for (const city of cities) {
+      const name = String(city?.name || "").trim();
+      if (!name) continue;
+
+      try {
+        if (city?._id && city._modified) {
+          await updateCity(districtId, city._id, { name });
+        } else if (!city?._id) {
+          await addCityToDistrict(districtId, { name });
+        }
+      } catch (e) {
+        throw e;
+      }
+    }
   };
 
   return (
@@ -118,7 +184,6 @@ export default function DistrictModal({
               className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-200 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
             />
           </div>
-
           {mode === "create" ? (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
               <div className="flex items-center justify-between gap-3">
@@ -160,6 +225,46 @@ export default function DistrictModal({
                       }
                       className="inline-flex h-10 items-center rounded-lg border border-rose-200 px-2 text-rose-700 transition hover:bg-rose-50 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
                       aria-label="Remove city input"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {mode === "edit" ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800/50">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">Cities</p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">Edit cities for this district</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddCityRow}
+                  className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add City
+                </button>
+              </div>
+
+              <div className="mt-3 space-y-2">
+                {form.cities.map((city, index) => (
+                  <div key={`city-edit-${index}`} className="flex items-center gap-2">
+                    <input
+                      value={city?.name || ""}
+                      onChange={(event) => handleCityNameChange(index, event.target.value)}
+                      placeholder="e.g., Kakarvitta"
+                      className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-blue-200 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveCityRow(index)}
+                      className="inline-flex h-10 items-center rounded-lg border border-rose-200 px-2 text-rose-700 transition hover:bg-rose-50 dark:border-rose-800 dark:text-rose-300 dark:hover:bg-rose-900/30"
+                      aria-label="Remove city"
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>

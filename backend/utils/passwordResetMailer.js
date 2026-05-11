@@ -56,6 +56,14 @@ exports.sendPasswordResetEmailSafely = async ({ to, name, resetUrl }) => {
 
 		return true;
 	} catch (e) {
+		const provider = String(process.env.SMTP_PROVIDER || "").trim().toLowerCase();
+		const responseCode = Number(e?.responseCode || 0);
+		if (provider === "gmail" && (e?.code === "EAUTH" || responseCode === 535)) {
+			// Avoid noisy stack traces for the expected Gmail app-password failure mode.
+			console.warn("Gmail SMTP authentication failed while sending the password reset email. Use a Google App Password and verify SMTP_USER/SMTP_PASSWORD.");
+			return false;
+		}
+
 		// eslint-disable-next-line no-console
 		console.error("Password reset email failed", e);
 		return false;

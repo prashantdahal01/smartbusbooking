@@ -6,24 +6,31 @@ import axiosInstance from "./axios";
 // deleteUser(id)         – DELETE /api/admin/users/:id
 // getSystemStats()       – GET    /api/admin/stats
 
+const unwrapData = (payload) => {
+	if (payload && typeof payload === "object" && Object.prototype.hasOwnProperty.call(payload, "data")) {
+		return payload.data;
+	}
+	return payload;
+};
+
 export async function getBuses() {
 	const res = await axiosInstance.get("/admin/bus");
-	return res.data;
+	return unwrapData(res.data);
 }
 
 export async function createBus(data) {
 	const res = await axiosInstance.post("/admin/bus", data);
-	return res.data;
+	return unwrapData(res.data);
 }
 
 export async function updateBus(id, data) {
 	const res = await axiosInstance.put(`/admin/bus/${id}`, data);
-	return res.data;
+	return unwrapData(res.data);
 }
 
 export async function deleteBus(id) {
 	const res = await axiosInstance.delete(`/admin/bus/${id}`);
-	return res.data;
+	return unwrapData(res.data);
 }
 
 export async function getRoutes() {

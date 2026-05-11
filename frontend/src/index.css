@@ -1,5 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&display=swap");
 
+@import "react-datepicker/dist/react-datepicker.css";
+
 @import "tailwindcss";
 
 @config "../tailwind.config.js";
@@ -26,6 +28,78 @@ body {
 
 .admin-surface-hover {
   @apply transition-all duration-300 hover:-translate-y-0.5 hover:shadow-md;
+}
+
+.admin-fade-up {
+  animation: admin-fade-up 0.6s ease both;
+}
+
+@keyframes admin-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0px);
+  }
+}
+
+.sbb-datepicker-popper {
+  z-index: 70;
+}
+
+.sbb-datepicker {
+  border-radius: 1rem !important;
+  border: 1px solid rgb(226 232 240) !important;
+  box-shadow: 0 18px 40px rgb(15 23 42 / 0.16);
+  font-family: "Manrope", "Segoe UI", Arial, sans-serif;
+  overflow: hidden;
+}
+
+.sbb-datepicker .react-datepicker__header {
+  background: linear-gradient(135deg, rgb(255 237 213), rgb(254 215 170));
+  border-bottom: 1px solid rgb(251 191 36 / 0.45);
+  padding-top: 0.85rem;
+}
+
+.sbb-datepicker .react-datepicker__current-month,
+.sbb-datepicker .react-datepicker-time__header,
+.sbb-datepicker .react-datepicker-year-header {
+  color: rgb(124 45 18);
+  font-weight: 700;
+}
+
+.sbb-datepicker .react-datepicker__day-name,
+.sbb-datepicker .react-datepicker__day,
+.sbb-datepicker .react-datepicker__time-name {
+  color: rgb(30 41 59);
+  font-weight: 600;
+}
+
+.sbb-datepicker .react-datepicker__day--selected,
+.sbb-datepicker .react-datepicker__day--keyboard-selected,
+.sbb-datepicker .react-datepicker__time-list-item--selected {
+  background: rgb(249 115 22) !important;
+  color: white !important;
+}
+
+.sbb-datepicker .react-datepicker__day:hover,
+.sbb-datepicker .react-datepicker__time-list-item:hover {
+  background: rgb(254 215 170) !important;
+}
+
+.sbb-datepicker .react-datepicker__navigation-icon::before {
+  border-color: rgb(124 45 18);
+}
+
+.sbb-datepicker .react-datepicker__triangle {
+  display: none;
+}
+
+.sbb-datepicker .react-datepicker__time-container {
+  border-left: 1px solid rgb(226 232 240);
 }
 
 .skeleton {

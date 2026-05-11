@@ -1,4 +1,4 @@
-const Route = require("../../models/Route");
+const { Route } = require("../../modules/route/route.model");
 const { normalizeText, normalizePathKey, buildOrderedRoutePathWithMeta } = require("./routePathBuilder");
 
 const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

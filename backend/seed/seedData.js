@@ -7,15 +7,15 @@ require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 const bcrypt = require("bcryptjs");
 const connectDB = require("../config/db");
 
-const User = require("../models/User");
-const Bus = require("../models/Bus");
-const Route = require("../models/Route");
-const Schedule = require("../models/Schedule");
-const Booking = require("../models/Booking");
-const SeatLock = require("../models/SeatLock");
-const City = require("../models/City");
-const District = require("../models/District");
-const Stop = require("../models/Stop");
+const { User } = require("../modules/user/user.model");
+const { Bus } = require("../modules/bus/bus.model");
+const { Route } = require("../modules/route/route.model");
+const { Schedule } = require("../modules/schedule/schedule.model");
+const { Booking } = require("../modules/booking/booking.model");
+const { SeatLock } = require("../modules/seatLock/seatLock.model");
+const { City } = require("../modules/location/location.model");
+const { District } = require("../modules/district/district.model");
+const { Stop } = require("../modules/stop/stop.model");
 
 const seed = async () => {
 	await connectDB();

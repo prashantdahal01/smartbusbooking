@@ -1,7 +1,7 @@
 const { seatLockService } = require("../../algorithms/seatLock");
 const { generateTicketPdfBuffer } = require("../../utils/ticketPdf");
 const { createAdminNotification } = require("../../services/notification.service");
-const { buildRouteOrderIndex } = require("../../utils/routePoints");
+const { buildRouteOrderIndex, normalizeKey } = require("../../utils/routePoints");
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
@@ -10,7 +10,10 @@ const {
   isRetryablePendingBooking,
 } = require("../../utils/bookingState");
 const { ApiError } = require("../../utils/apiError");
-const { Booking, Bus, Schedule, SeatLock } = require("./booking.model");
+const { Booking } = require("./booking.model");
+const { Bus } = require("../bus/bus.model");
+const { Schedule } = require("../schedule/schedule.model");
+const { SeatLock } = require("../seatLock/seatLock.model");
 const seatService = require("../seat/seat.service");
 const {
   DEFAULT_SEAT_PRICE,
@@ -212,23 +215,16 @@ const createBooking = async ({ userId, body }) => {
     throw new ApiError(400, "Invalid dropping point", null);
   }
 
-  const boardingOrder = Number(selectedBoardingPoint?.order);
-  const droppingOrder = Number(selectedDroppingPoint?.order);
-
-  if (Number.isFinite(boardingOrder) && Number.isFinite(droppingOrder)) {
-    if (droppingOrder <= boardingOrder) {
-      throw new ApiError(400, "Dropping point must be after boarding point", null);
-    }
-  } else {
-    const routeOrderIndex = buildRouteOrderIndex(schedule.route || {});
-    const bIdx = routeOrderIndex.get(stopKey(selectedBoardingPoint.name));
-    const dIdx = routeOrderIndex.get(stopKey(selectedDroppingPoint.name));
-    if (bIdx === undefined || dIdx === undefined) {
-      throw new ApiError(400, "Selected points must exist in the route stop list", null);
-    }
-    if (dIdx <= bIdx) {
-      throw new ApiError(400, "Dropping point must be after boarding point", null);
-    }
+  const routeOrderIndex = buildRouteOrderIndex(schedule.route || {});
+  const bIdx = routeOrderIndex.get(normalizeKey(selectedBoardingPoint.name))
+    ?? routeOrderIndex.get(stopKey(selectedBoardingPoint.name));
+  const dIdx = routeOrderIndex.get(normalizeKey(selectedDroppingPoint.name))
+    ?? routeOrderIndex.get(stopKey(selectedDroppingPoint.name));
+  if (bIdx === undefined || dIdx === undefined) {
+    throw new ApiError(400, "Selected points must exist in the route stop list", null);
+  }
+  if (dIdx <= bIdx) {
+    throw new ApiError(400, "Dropping point must be after boarding point", null);
   }
 
   const boardingMs = parseIsoDateTimeMs(selectedBoardingPoint.date, selectedBoardingPoint.time);

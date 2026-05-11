@@ -1,11 +1,11 @@
-const Bus = require("../../models/Bus");
-const City = require("../../models/City");
-const Route = require("../../models/Route");
-const Schedule = require("../../models/Schedule");
-const Stop = require("../../models/Stop");
-const User = require("../../models/User");
-const Booking = require("../../models/Booking");
-const Notification = require("../../models/Notification");
+const { Bus } = require("../bus/bus.model");
+const { City } = require("../location/location.model");
+const { Route } = require("../route/route.model");
+const { Schedule } = require("../schedule/schedule.model");
+const { Stop } = require("../stop/stop.model");
+const { User } = require("../user/user.model");
+const { Booking } = require("../booking/booking.model");
+const { Notification } = require("../notification/notification.model");
 
 module.exports = {
   Bus,

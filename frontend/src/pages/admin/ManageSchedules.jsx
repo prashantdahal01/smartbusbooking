@@ -1,5 +1,7 @@
 // Admin page for managing schedules/trips with detailed trip metadata
 import { useEffect, useMemo, useRef, useState } from "react";
+import DatePicker from "react-datepicker";
+import { addDays, addMinutes, format } from "date-fns";
 import {
 	createSchedule,
 	deleteSchedule,
@@ -37,41 +39,47 @@ const stopTypeAllowsDropping = (value) => {
 	return type === "drop" || type === "both";
 };
 
-const toStopName = (raw) => {
-	if (raw === null || raw === undefined) return "";
-	if (typeof raw === "string") return raw;
-	if (typeof raw === "object") return raw.name;
-	return "";
-};
-
-const toStopKmFromSource = (raw) => {
-	if (!raw || typeof raw !== "object") return undefined;
-	if (raw.kmFromSource !== undefined) return raw.kmFromSource;
-	if (raw.distanceFromSourceKm !== undefined) return raw.distanceFromSourceKm;
-	if (raw.km !== undefined) return raw.km;
-	return undefined;
-};
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_KEY_RE = /^\d{2}:\d{2}$/;
 
 const parseIsoDateTimeMs = (date, time) => {
 	const d = String(date || "").trim();
 	const t = String(time || "").trim();
-	if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{2}:\d{2}$/.test(t)) return NaN;
+	if (!DATE_KEY_RE.test(d) || !TIME_KEY_RE.test(t)) return NaN;
 	return new Date(`${d}T${t}:00`).getTime();
 };
 
-const pad2 = (n) => String(n).padStart(2, "0");
+const formatLocalDate = (ms) => format(new Date(ms), "yyyy-MM-dd");
+const formatLocalTime = (ms) => format(new Date(ms), "HH:mm");
+const formatDateKey = (value) => format(value, "yyyy-MM-dd");
+const formatTimeKey = (value) => format(value, "HH:mm");
 
-const formatLocalDate = (ms) => {
-	const d = new Date(ms);
-	return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const toLocalDate = (dateKey) => {
+	const raw = String(dateKey || "").trim();
+	if (!DATE_KEY_RE.test(raw)) return null;
+	const [yearRaw, monthRaw, dayRaw] = raw.split("-");
+	const year = Number(yearRaw);
+	const month = Number(monthRaw);
+	const day = Number(dayRaw);
+	if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+	const parsed = new Date(year, month - 1, day);
+	if (Number.isNaN(parsed.getTime())) return null;
+	if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) return null;
+	return parsed;
 };
 
-const formatLocalTime = (ms) => {
-	const d = new Date(ms);
-	return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const toLocalDateTime = (dateKey, timeKey) => {
+	const date = toLocalDate(dateKey);
+	const timeRaw = String(timeKey || "").trim();
+	if (!date || !TIME_KEY_RE.test(timeRaw)) return null;
+	const [hoursRaw, minutesRaw] = timeRaw.split(":");
+	const hours = Number(hoursRaw);
+	const minutes = Number(minutesRaw);
+	if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return null;
+	const parsed = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes, 0, 0);
+	if (Number.isNaN(parsed.getTime())) return null;
+	return parsed;
 };
-
-const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const DEPARTURE_TEMPLATES = [
 	{ label: "Morning", time: "06:30", durationHours: "6" },
@@ -81,6 +89,7 @@ const DEPARTURE_TEMPLATES = [
 ];
 
 const DURATION_PRESET_HOURS = ["4", "6", "8", "10"];
+const STEP_MINUTES = 30;
 
 const parseDateKeyMs = (dateKey) => {
 	const raw = String(dateKey || "").trim();
@@ -585,28 +594,6 @@ export default function ManageSchedules() {
 		return map;
 	}, [droppingPointOptions]);
 
-	const stopKmByKey = useMemo(() => {
-		const map = new Map();
-		if (!selectedRoute) return map;
-
-		const totalKm = Number(selectedRoute.distance);
-		if (!Number.isFinite(totalKm) || totalKm <= 0) return map;
-
-		const routeStops = Array.isArray(selectedRoute.stops) ? selectedRoute.stops : [];
-		routeStops.forEach((raw) => {
-			const name = String(toStopName(raw) || "").trim();
-			if (!name) return;
-			const key = stopKey(name);
-			if (!key) return;
-			const kmRaw = toStopKmFromSource(raw);
-			const km = kmRaw !== undefined && kmRaw !== null && kmRaw !== "" ? Number(kmRaw) : NaN;
-			if (!Number.isFinite(km)) return;
-			map.set(key, Math.max(0, Math.min(totalKm, km)));
-		});
-
-		return map;
-	}, [selectedRoute]);
-
 	const departureMs = useMemo(() => parseIsoDateTimeMs(date, time), [date, time]);
 	const selectedDurationMinutes = useMemo(() => {
 		const parsedHours = Number(durationHours);
@@ -631,50 +618,16 @@ export default function ManageSchedules() {
 		return NaN;
 	}, [arrivalDate, arrivalTime, date, departureMs, selectedDurationMinutes]);
 
-	const autoPointByKey = useMemo(() => {
-		const map = new Map();
-		if (!Number.isFinite(departureMs)) return map;
+	const baseDepartureDate = useMemo(() => toLocalDateTime(date, time), [date, time]);
 
-		const baseDate = String(date || "").trim();
-		if (!baseDate || routeStopEntries.length === 0) return map;
-
-		const isValidHHmm = (s) => /^\d{2}:\d{2}$/.test(String(s || "").trim());
-
-		routeStopEntries.forEach((entry) => {
-			const key = pointIdentity({ stopId: entry.stopId, name: entry.name });
-			const abs = String(entry?.absoluteTime || "").trim();
-			if (abs && isValidHHmm(abs)) {
-				const parsed = parseIsoDateTimeMs(baseDate, abs);
-				if (!Number.isFinite(parsed)) return;
-				let ms = parsed;
-				while (ms < departureMs) ms += 24 * 60 * 60 * 1000;
-				map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
-				return;
-			}
-
-			const offset = Number(entry?.offsetMinutes);
-			if (!Number.isFinite(offset) || offset < 0) return;
-			const ms = departureMs + Math.round(offset) * 60 * 1000;
-			map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
-		});
-
-		if (Number.isFinite(arrivalMs) && arrivalMs > departureMs) {
-			const totalKm = Number(selectedRoute.distance);
-			if (Number.isFinite(totalKm) && totalKm > 0) {
-				routeStopEntries.forEach((entry) => {
-					const key = pointIdentity({ stopId: entry.stopId, name: entry.name });
-					if (map.has(key)) return;
-					const km = stopKmByKey.get(entry.cityKey);
-					if (!Number.isFinite(km)) return;
-					const frac = totalKm > 0 ? km / totalKm : 0;
-					const ms = departureMs + Math.round(frac * (arrivalMs - departureMs));
-					map.set(key, { date: formatLocalDate(ms), time: formatLocalTime(ms) });
-				});
-			}
-		}
-
-		return map;
-	}, [arrivalMs, date, departureMs, routeStopEntries, selectedRoute, stopKmByKey]);
+	const getAutoDefaults = (dayOffsetDays) => {
+		if (!baseDepartureDate) return { date: "", time: "" };
+		const base = addDays(baseDepartureDate, dayOffsetDays);
+		return {
+			date: formatDateKey(base),
+			time: formatTimeKey(base),
+		};
+	};
 
 	const stopIndexByKey = useMemo(() => {
 		const map = new Map();
@@ -691,6 +644,43 @@ export default function ManageSchedules() {
 		const identity = pointIdentity(point);
 		if (stopIndexByKey.has(identity)) return stopIndexByKey.get(identity);
 		return stopIndexByKey.get(`name:${stopKey(point?.name)}`) ?? Number.POSITIVE_INFINITY;
+	};
+
+	const sortPointsByIndex = (points) =>
+		[...(Array.isArray(points) ? points : [])].sort((a, b) => {
+			const ai = pointSortIndex(a);
+			const bi = pointSortIndex(b);
+			if (ai !== bi) return ai - bi;
+			return String(a?.name || "").localeCompare(String(b?.name || ""));
+		});
+
+	const buildSequentialScheduleMap = (points, baseDateTime, dayOffsetDays) => {
+		if (!baseDateTime) return new Map();
+		const ordered = sortPointsByIndex(points);
+		if (ordered.length === 0) return new Map();
+		const start = addDays(baseDateTime, dayOffsetDays);
+		const map = new Map();
+		ordered.forEach((point, index) => {
+			const slot = addMinutes(start, index * STEP_MINUTES);
+			map.set(pointIdentity(point), {
+				date: formatDateKey(slot),
+				time: formatTimeKey(slot),
+			});
+		});
+		return map;
+	};
+
+	const applyAutoSchedule = (points, scheduleMap) => {
+		let changed = false;
+		const next = (Array.isArray(points) ? points : []).map((point) => {
+			if (!point?._auto) return point;
+			const auto = scheduleMap.get(pointIdentity(point));
+			if (!auto) return point;
+			if (point.date === auto.date && point.time === auto.time) return point;
+			changed = true;
+			return { ...point, date: auto.date, time: auto.time };
+		});
+		return changed ? next : points;
 	};
 
 	useEffect(() => {
@@ -720,23 +710,11 @@ export default function ManageSchedules() {
 	}, [routeStopEntries]);
 
 	const sortedBoardingPoints = useMemo(() => {
-		const arr = Array.isArray(boardingPoints) ? boardingPoints : [];
-		return [...arr].sort((a, b) => {
-			const ai = pointSortIndex(a);
-			const bi = pointSortIndex(b);
-			if (ai !== bi) return ai - bi;
-			return String(a?.name || "").localeCompare(String(b?.name || ""));
-		});
+		return sortPointsByIndex(boardingPoints);
 	}, [boardingPoints, stopIndexByKey]);
 
 	const sortedDroppingPoints = useMemo(() => {
-		const arr = Array.isArray(droppingPoints) ? droppingPoints : [];
-		return [...arr].sort((a, b) => {
-			const ai = pointSortIndex(a);
-			const bi = pointSortIndex(b);
-			if (ai !== bi) return ai - bi;
-			return String(a?.name || "").localeCompare(String(b?.name || ""));
-		});
+		return sortPointsByIndex(droppingPoints);
 	}, [droppingPoints, stopIndexByKey]);
 
 	const updatePointField = (setter, point, field, value) => {
@@ -749,17 +727,12 @@ export default function ManageSchedules() {
 	};
 
 	useEffect(() => {
-		if (!autoPointByKey || autoPointByKey.size === 0) return;
-		const applyAuto = (prev) =>
-			(Array.isArray(prev) ? prev : []).map((p) => {
-				if (!p?._auto) return p;
-				const auto = autoPointByKey.get(pointIdentity(p));
-				if (!auto) return p;
-				return { ...p, date: auto.date, time: auto.time };
-			});
-		setBoardingPoints(applyAuto);
-		setDroppingPoints(applyAuto);
-	}, [autoPointByKey]);
+		if (!baseDepartureDate) return;
+		const boardingMap = buildSequentialScheduleMap(sortedBoardingPoints, baseDepartureDate, 0);
+		const droppingMap = buildSequentialScheduleMap(sortedDroppingPoints, baseDepartureDate, 1);
+		setBoardingPoints((prev) => applyAutoSchedule(prev, boardingMap));
+		setDroppingPoints((prev) => applyAutoSchedule(prev, droppingMap));
+	}, [baseDepartureDate, sortedBoardingPoints, sortedDroppingPoints]);
 
 	const featureOptions = useMemo(() => {
 		const baseKeys = new Set(FEATURE_OPTIONS.map((o) => o.key));
@@ -1813,6 +1786,247 @@ export default function ManageSchedules() {
 										</div>
 							</div>
 
+								<div className="admin-fade-up rounded-3xl border border-slate-200 bg-linear-to-br from-white via-white to-orange-50 p-5 shadow-sm">
+									<div className="flex flex-wrap items-start justify-between gap-3">
+										<div>
+											<div className="display-title text-lg font-extrabold text-slate-900">Boarding & Dropping Schedule</div>
+											<p className="mt-1 text-xs text-slate-500">
+												Stops auto-sequence every {STEP_MINUTES} minutes. Drop times start the next day.
+											</p>
+										</div>
+										<div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold">
+											<span className="rounded-full bg-orange-100 px-2.5 py-1 text-orange-700">+{STEP_MINUTES} min</span>
+											<span className="rounded-full bg-sky-100 px-2.5 py-1 text-sky-700">Drop +1 day</span>
+										</div>
+									</div>
+
+									<div className="mt-5 grid gap-5 lg:grid-cols-2">
+										<div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+											<div className="flex items-start justify-between gap-3">
+												<div>
+													<div className="text-sm font-bold text-slate-900">Boarding lane</div>
+													<p className="mt-1 text-xs text-slate-500">Starts at the departure time and increments every {STEP_MINUTES} minutes.</p>
+												</div>
+												<span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-semibold text-amber-700">Same day</span>
+											</div>
+
+											{groupedBoardingPointOptions.length === 0 ? (
+												<div className="mt-4 text-xs text-slate-500">Select a route with pickup stops to see options.</div>
+											) : (
+												<div className="mt-4 space-y-3">
+													{groupedBoardingPointOptions.map((group) => (
+														<div key={`boarding-${group.district}`} className="rounded-2xl border border-slate-200 bg-white p-3">
+															<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{group.district}</div>
+															<div className="grid gap-2 sm:grid-cols-2">
+																{group.stops.map((option) => {
+																	const optionKey = pointIdentity(option);
+																	const checked = boardingPoints.some(
+																		(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
+																	);
+																	const templateLabel = formatTemplateTimeLabel(option);
+
+																	return (
+																		<label key={optionKey} className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+																			<input
+																				type="checkbox"
+																					checked={checked}
+																					onChange={() =>
+																					setBoardingPoints((prev) =>
+																						togglePointByStop(prev, option, { ...getAutoDefaults(0), _auto: true })
+																					)
+																				}
+																				className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
+																			/>
+																			<span>
+																				<span className="block font-semibold text-slate-800">{option.name}</span>
+																				{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
+																			</span>
+																		</label>
+																	);
+																})}
+															</div>
+														</div>
+													))}
+												</div>
+											)}
+
+											{sortedBoardingPoints.length > 0 ? (
+												<div className="mt-4 space-y-3">
+													<div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Pickup times</div>
+													{sortedBoardingPoints.map((point) => (
+														<div key={pointIdentity(point)} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+															<div className="flex items-center justify-between gap-2">
+																<div className="text-sm font-bold text-slate-900">{point.name}</div>
+																<span
+																	className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+																		point?._auto
+																				? "bg-emerald-100 text-emerald-700"
+																				: "bg-slate-100 text-slate-600"
+																		}`}
+																>
+																	{point?._auto ? "Auto" : "Manual"}
+																</span>
+															</div>
+															<div className="mt-3 grid gap-3 sm:grid-cols-2">
+																<div>
+																	<label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Date</label>
+																	<DatePicker
+																		selected={toLocalDate(point.date)}
+																		onChange={(next) =>
+																			updatePointField(setBoardingPoints, point, "date", next ? formatDateKey(next) : "")
+																		}
+																		dateFormat="MM/dd/yyyy"
+																		calendarClassName="sbb-datepicker"
+																		popperClassName="sbb-datepicker-popper"
+																		showPopperArrow={false}
+																		className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm outline-none transition focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+																		placeholderText="Select date"
+																	/>
+																</div>
+																<div>
+																	<label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Time</label>
+																	<DatePicker
+																		selected={toLocalDateTime(point.date, point.time)}
+																		onChange={(next) =>
+																			updatePointField(setBoardingPoints, point, "time", next ? formatTimeKey(next) : "")
+																		}
+																		showTimeSelect
+																		showTimeSelectOnly
+																		timeIntervals={STEP_MINUTES}
+																		timeCaption="Time"
+																		dateFormat="h:mm aa"
+																		calendarClassName="sbb-datepicker"
+																		popperClassName="sbb-datepicker-popper"
+																		showPopperArrow={false}
+																		className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm outline-none transition focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+																		placeholderText="Select time"
+																	/>
+																</div>
+															</div>
+														</div>
+													))}
+												</div>
+											) : (
+												<div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-4 text-xs text-slate-500">
+													Select boarding points to generate pickup times.
+												</div>
+											)}
+										</div>
+
+										<div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+											<div className="flex items-start justify-between gap-3">
+												<div>
+													<div className="text-sm font-bold text-slate-900">Dropping lane</div>
+													<p className="mt-1 text-xs text-slate-500">Starts the next day at the same base time and increments every {STEP_MINUTES} minutes.</p>
+												</div>
+												<span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold text-sky-700">Next day</span>
+											</div>
+
+											{groupedDroppingPointOptions.length === 0 ? (
+												<div className="mt-4 text-xs text-slate-500">Select a route with dropping stops to see options.</div>
+											) : (
+												<div className="mt-4 space-y-3">
+													{groupedDroppingPointOptions.map((group) => (
+														<div key={`dropping-${group.district}`} className="rounded-2xl border border-slate-200 bg-white p-3">
+															<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{group.district}</div>
+															<div className="grid gap-2 sm:grid-cols-2">
+																{group.stops.map((option) => {
+																	const optionKey = pointIdentity(option);
+																	const checked = droppingPoints.some(
+																		(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
+																	);
+																	const templateLabel = formatTemplateTimeLabel(option);
+
+																	return (
+																		<label key={optionKey} className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+																			<input
+																				type="checkbox"
+																					checked={checked}
+																					onChange={() =>
+																					setDroppingPoints((prev) =>
+																						togglePointByStop(prev, option, { ...getAutoDefaults(1), _auto: true })
+																					)
+																				}
+																				className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
+																			/>
+																			<span>
+																				<span className="block font-semibold text-slate-800">{option.name}</span>
+																				{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
+																			</span>
+																		</label>
+																	);
+																})}
+															</div>
+														</div>
+													))}
+												</div>
+											)}
+
+											{sortedDroppingPoints.length > 0 ? (
+												<div className="mt-4 space-y-3">
+													<div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Drop times</div>
+													{sortedDroppingPoints.map((point) => (
+														<div key={pointIdentity(point)} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+															<div className="flex items-center justify-between gap-2">
+																<div className="text-sm font-bold text-slate-900">{point.name}</div>
+																<span
+																	className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+																		point?._auto
+																				? "bg-emerald-100 text-emerald-700"
+																				: "bg-slate-100 text-slate-600"
+																		}`}
+																>
+																	{point?._auto ? "Auto" : "Manual"}
+																</span>
+															</div>
+															<div className="mt-3 grid gap-3 sm:grid-cols-2">
+																<div>
+																	<label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Date</label>
+																	<DatePicker
+																		selected={toLocalDate(point.date)}
+																		onChange={(next) =>
+																			updatePointField(setDroppingPoints, point, "date", next ? formatDateKey(next) : "")
+																		}
+																		dateFormat="MM/dd/yyyy"
+																		calendarClassName="sbb-datepicker"
+																		popperClassName="sbb-datepicker-popper"
+																		showPopperArrow={false}
+																		className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm outline-none transition focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+																		placeholderText="Select date"
+																	/>
+																</div>
+																<div>
+																	<label className="block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Time</label>
+																	<DatePicker
+																		selected={toLocalDateTime(point.date, point.time)}
+																		onChange={(next) =>
+																			updatePointField(setDroppingPoints, point, "time", next ? formatTimeKey(next) : "")
+																		}
+																		showTimeSelect
+																		showTimeSelectOnly
+																		timeIntervals={STEP_MINUTES}
+																		timeCaption="Time"
+																		dateFormat="h:mm aa"
+																		calendarClassName="sbb-datepicker"
+																		popperClassName="sbb-datepicker-popper"
+																		showPopperArrow={false}
+																		className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm outline-none transition focus:border-orange-300 focus:ring-2 focus:ring-orange-100"
+																		placeholderText="Select time"
+																	/>
+																</div>
+															</div>
+														</div>
+													))}
+												</div>
+											) : (
+												<div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-white/70 px-4 py-4 text-xs text-slate-500">
+													Select dropping points to generate drop times for the next day.
+												</div>
+											)}
+										</div>
+									</div>
+								</div>
+
 							<div className="rounded-2xl border border-slate-100 bg-slate-50 p-5">
 								<div className="text-sm font-semibold text-slate-700">Options</div>
 								<p className="mt-1 text-xs text-slate-500">Tick the options you want to show on booking pages.</p>
@@ -1850,162 +2064,6 @@ export default function ManageSchedules() {
 												</label>
 											))}
 										</div>
-									</div>
-
-									<div className="rounded-xl border border-slate-100 bg-white p-4">
-										<div className="text-xs font-semibold text-slate-600">Boarding points</div>
-										{groupedBoardingPointOptions.length === 0 ? (
-											<div className="mt-3 text-xs text-slate-500">Select a route with pickup stops to see options.</div>
-										) : (
-											<div className="mt-3 space-y-3">
-												{groupedBoardingPointOptions.map((group) => (
-													<div key={`boarding-${group.district}`} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-														<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">{group.district}</div>
-														<div className="grid gap-2 sm:grid-cols-2">
-															{group.stops.map((option) => {
-																const optionKey = pointIdentity(option);
-																const checked = boardingPoints.some(
-																	(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
-																);
-																const templateLabel = formatTemplateTimeLabel(option);
-
-																return (
-																	<label key={optionKey} className="inline-flex select-none items-start gap-2 text-sm text-slate-700">
-																		<input
-																			type="checkbox"
-																			checked={checked}
-																			onChange={() =>
-																			setBoardingPoints((prev) => {
-																				const auto = autoPointByKey.get(optionKey);
-																				return togglePointByStop(prev, option, auto ? { ...auto, _auto: true } : { date, time, _auto: false });
-																			})
-																		}
-																		className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
-																	/>
-																		<span>
-																			<span className="block">{option.name}</span>
-																			{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
-																		</span>
-																	</label>
-																);
-															})}
-														</div>
-													</div>
-												))}
-											</div>
-										)}
-
-										{sortedBoardingPoints.length > 0 ? (
-											<div className="mt-4 space-y-3">
-												<div className="text-xs font-semibold text-slate-600">Pickup times</div>
-												{sortedBoardingPoints.map((p) => (
-													<div key={pointIdentity(p)} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-														<div className="text-sm font-semibold text-slate-800">{p.name}</div>
-														<div className="mt-2 grid gap-3 sm:grid-cols-2">
-															<div>
-																<label className="block text-[11px] font-semibold text-slate-600">Date</label>
-																<input
-																	type="date"
-																	value={p.date || ""}
-																	onChange={(e) => updatePointField(setBoardingPoints, p, "date", e.target.value)}
-																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-																/>
-															</div>
-															<div>
-																<label className="block text-[11px] font-semibold text-slate-600">Time</label>
-																<input
-																	type="time"
-																	value={p.time || ""}
-																	onChange={(e) => updatePointField(setBoardingPoints, p, "time", e.target.value)}
-																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-																/>
-															</div>
-														</div>
-													</div>
-												))}
-											</div>
-										) : null}
-									</div>
-
-									<div className="rounded-xl border border-slate-100 bg-white p-4">
-										<div className="text-xs font-semibold text-slate-600">Dropping points</div>
-										{groupedDroppingPointOptions.length === 0 ? (
-											<div className="mt-3 text-xs text-slate-500">Select a route with dropping stops to see options.</div>
-										) : (
-											<div className="mt-3 space-y-3">
-												{groupedDroppingPointOptions.map((group) => (
-													<div key={`dropping-${group.district}`} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-														<div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-600">{group.district}</div>
-														<div className="grid gap-2 sm:grid-cols-2">
-															{group.stops.map((option) => {
-																const optionKey = pointIdentity(option);
-																const checked = droppingPoints.some(
-																	(p) => pointIdentity(p) === optionKey || stopKey(p?.name) === option.cityKey
-																);
-																const templateLabel = formatTemplateTimeLabel(option);
-
-																return (
-																	<label key={optionKey} className="inline-flex select-none items-start gap-2 text-sm text-slate-700">
-																		<input
-																			type="checkbox"
-																			checked={checked}
-																			onChange={() =>
-																			setDroppingPoints((prev) => {
-																				const auto = autoPointByKey.get(optionKey);
-																				return togglePointByStop(
-																					prev,
-																					option,
-																					auto
-																						? { ...auto, _auto: true }
-																						: { date: arrivalDate || date, time: arrivalTime || time, _auto: false }
-																				);
-																			})
-																		}
-																		className="mt-0.5 h-4 w-4 rounded border-slate-300 text-orange-500"
-																	/>
-																		<span>
-																			<span className="block">{option.name}</span>
-																			{templateLabel ? <span className="text-xs text-slate-500">{templateLabel}</span> : null}
-																		</span>
-																	</label>
-																);
-															})}
-														</div>
-													</div>
-												))}
-											</div>
-										)}
-
-										{sortedDroppingPoints.length > 0 ? (
-											<div className="mt-4 space-y-3">
-												<div className="text-xs font-semibold text-slate-600">Drop times</div>
-												{sortedDroppingPoints.map((p) => (
-													<div key={pointIdentity(p)} className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-														<div className="text-sm font-semibold text-slate-800">{p.name}</div>
-														<div className="mt-2 grid gap-3 sm:grid-cols-2">
-															<div>
-																<label className="block text-[11px] font-semibold text-slate-600">Date</label>
-																<input
-																	type="date"
-																	value={p.date || ""}
-																	onChange={(e) => updatePointField(setDroppingPoints, p, "date", e.target.value)}
-																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-																/>
-															</div>
-															<div>
-																<label className="block text-[11px] font-semibold text-slate-600">Time</label>
-																<input
-																	type="time"
-																	value={p.time || ""}
-																	onChange={(e) => updatePointField(setDroppingPoints, p, "time", e.target.value)}
-																	className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm outline-none focus:border-slate-300 focus:ring-2 focus:ring-slate-200"
-																/>
-															</div>
-														</div>
-													</div>
-												))}
-											</div>
-										) : null}
 									</div>
 								</div>
 							</div>

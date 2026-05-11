@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 
-const Route = require("../models/Route");
-const Stop = require("../models/Stop");
+const { Route } = require("../modules/route/route.model");
+const { Stop } = require("../modules/stop/stop.model");
 
 const normalizeText = (value) => String(value || "").trim();
 const normalizeKey = (value) => normalizeText(value).toLowerCase();

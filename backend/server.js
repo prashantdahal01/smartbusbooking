@@ -5,7 +5,7 @@ const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const connectDB = require("./config/db");
-const apiRoutes = require("./routes");
+const moduleRouter = require("./modules");
 const { isApiError } = require("./utils/apiError");
 
 const app = express();
@@ -23,7 +23,9 @@ app.get("/api/health", sendApiHealth);
 app.get("/api/status", sendApiHealth);
 
 // ================= ROUTES =================
-app.use("/api", apiRoutes);
+// Support both /api and /api/v1 to avoid 404s from mismatched frontend base URLs.
+app.use("/api", moduleRouter);
+app.use("/api/v1", moduleRouter);
 
 // ================= SERVE FRONTEND =================
 // VERY IMPORTANT: Serve Vite build files

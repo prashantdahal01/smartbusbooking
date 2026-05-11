@@ -1,8 +1,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const Booking = require("../../models/Booking");
-const SeatLock = require("../../models/SeatLock");
+const { Booking } = require("../../modules/booking/booking.model");
+const { SeatLock } = require("../../modules/seatLock/seatLock.model");
 const {
   SeatLockError,
   lockSeats,
