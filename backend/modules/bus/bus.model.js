@@ -47,6 +47,18 @@ const busSchema = new mongoose.Schema({
   vehicleNumber: String,
   phone: String,
   totalSeats: Number,
+  avgRating: {
+    type: Number,
+    default: 0,
+  },
+  reviewCount: {
+    type: Number,
+    default: 0,
+  },
+  weightedScore: {
+    type: Number,
+    default: 0,
+  },
   decks: { type: [deckSchema], default: [] },
   images: { type: busImagesSchema, default: () => ({}) },
   // Legacy single-image field retained for backward compatibility.

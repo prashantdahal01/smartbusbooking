@@ -171,9 +171,23 @@ const searchSchedules = async ({ query } = {}) => {
       price: (a, b) => (Number(a.price || 0) - Number(b.price || 0)),
       duration: (a, b) => (Number(a.durationMinutes || 0) - Number(b.durationMinutes || 0)),
       available: (a, b) => (Number(b._availableSeats || 0) - Number(a._availableSeats || 0)),
+      rating: (a, b) => {
+        const aWeighted = Number(a?.bus?.weightedScore || 0);
+        const bWeighted = Number(b?.bus?.weightedScore || 0);
+        if (aWeighted !== bWeighted) return bWeighted - aWeighted;
+
+        const aAvg = Number(a?.bus?.avgRating || 0);
+        const bAvg = Number(b?.bus?.avgRating || 0);
+        if (aAvg !== bAvg) return bAvg - aAvg;
+
+        const aCount = Number(a?.bus?.reviewCount || 0);
+        const bCount = Number(b?.bus?.reviewCount || 0);
+        return bCount - aCount;
+      },
     };
 
-    const cmp = compareFns[sortKey] || compareFns.departure;
+    const normalizedSortKey = sortKey === 'highest-rated' ? 'rating' : sortKey;
+    const cmp = compareFns[normalizedSortKey] || compareFns.departure;
     filtered.sort((a, b) => {
       // Fully booked go last always
       const aFull = Number(a._availableSeats || 0) === 0;

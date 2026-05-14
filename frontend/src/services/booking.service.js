@@ -36,11 +36,12 @@ const filterValidSchedules = (rows) => {
 	return (Array.isArray(rows) ? rows : []).filter((schedule) => isValidUpcomingSchedule(schedule, todayStart));
 };
 
-export async function searchSchedules({ source, destination, date, includeRoutePlan = false }) {
+export async function searchSchedules({ source, destination, date, includeRoutePlan = false, sortBy } = {}) {
 	const params = new URLSearchParams();
 	if (source) params.set("source", source);
 	if (destination) params.set("destination", destination);
 	if (date) params.set("date", date);
+	if (sortBy) params.set("sortBy", sortBy);
 	if (includeRoutePlan) params.set("includeRoutePlan", "true");
 	const res = await axiosInstance.get(`/schedules/search?${params.toString()}`);
 
@@ -51,6 +52,11 @@ export async function searchSchedules({ source, destination, date, includeRouteP
 		};
 	}
 
+	return filterValidSchedules(res.data);
+}
+
+export async function getAvailableSchedules() {
+	const res = await axiosInstance.get("/schedules/available");
 	return filterValidSchedules(res.data);
 }
 
@@ -129,6 +135,26 @@ export async function getMyBookings() {
 
 export async function getBookingById(id) {
 	const res = await axiosInstance.get(`/bookings/${id}`);
+	return res.data?.data ?? res.data;
+}
+
+export async function submitReview({ bookingId, busId, rating, comment }) {
+	const res = await axiosInstance.post("/reviews", {
+		bookingId,
+		busId,
+		rating,
+		comment,
+	});
+	return res.data?.review ?? res.data;
+}
+
+export async function getBusReviews(busId) {
+	const res = await axiosInstance.get(`/reviews/bus/${busId}`);
+	return res.data?.data ?? res.data;
+}
+
+export async function getMyReviews() {
+	const res = await axiosInstance.get("/reviews/my");
 	return res.data?.data ?? res.data;
 }
 

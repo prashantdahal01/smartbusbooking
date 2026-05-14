@@ -1,8 +1,8 @@
 // Card component summarizing a booking (route, date, seats, fare, status)
 // Used in customer dashboard and booking confirmation
 import { motion } from "framer-motion";
-import { BusFront, CalendarDays, Clock3, MapPin, Ticket } from "lucide-react";
-import { useMemo } from "react";
+import { BusFront, CalendarDays, Clock3, MapPin, Star, Ticket } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { formatCurrency } from "../utils/helpers";
 
 const statusClassByKey = {
@@ -79,8 +79,21 @@ const formatDateLabel = (rawDate) => {
   });
 };
 
-export default function BookingCard({ booking, nowMs = Date.now(), onRetryPayment, retrying = false }) {
+export default function BookingCard({
+	booking,
+	nowMs = Date.now(),
+	onRetryPayment,
+	retrying = false,
+	review,
+	canReview = false,
+	onSubmitReview,
+	submittingReview = false,
+}) {
 	if (!booking) return null;
+	const [ratingInput, setRatingInput] = useState("5");
+	const [commentInput, setCommentInput] = useState("");
+	const [reviewError, setReviewError] = useState("");
+	const [reviewTouched, setReviewTouched] = useState(false);
 	const route = booking.schedule?.route;
 	const bus = booking.schedule?.bus;
 	const state = normalizeBookingState(booking);
@@ -127,6 +140,47 @@ export default function BookingCard({ booking, nowMs = Date.now(), onRetryPaymen
 	const showPendingTimer = state.bookingStatus === "pending";
 	const canRetryPayment = Boolean(booking?.retryEligible) && hasActiveLock && state.bookingStatus === "pending";
 	const paymentButtonLabel = retrying ? "Redirecting..." : "Pay Now";
+
+	useEffect(() => {
+		if (review) {
+			setCommentInput("");
+			setReviewError("");
+			setReviewTouched(false);
+		}
+	}, [review]);
+
+	const onSubmitReviewClick = async () => {
+		setReviewTouched(true);
+		setReviewError("");
+
+		if (typeof onSubmitReview !== "function") return;
+
+		const bookingId = String(booking?._id || "").trim();
+		const busId = String(booking?.schedule?.bus?._id || "").trim();
+		const rating = Number(ratingInput);
+
+		if (!bookingId || !busId) {
+			setReviewError("Booking details are incomplete for review submission.");
+			return;
+		}
+
+		if (!Number.isFinite(rating) || rating < 1 || rating > 5) {
+			setReviewError("Please select a rating between 1 and 5.");
+			return;
+		}
+
+		try {
+			await onSubmitReview({
+				bookingId,
+				busId,
+				rating,
+				comment: commentInput,
+			});
+			setCommentInput("");
+		} catch (error) {
+			setReviewError(error?.message || "Could not submit review.");
+		}
+	};
 
 	return (
 		<motion.article
@@ -198,6 +252,56 @@ export default function BookingCard({ booking, nowMs = Date.now(), onRetryPaymen
 							</p>
 						</div>
 					</div>
+
+					{review ? (
+						<div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+							<p className="inline-flex items-center gap-1.5 font-semibold">
+								<Star className="h-4 w-4 fill-amber-400 text-amber-500" />
+								Your rating: {Number(review.rating || 0).toFixed(1)} / 5
+							</p>
+							{String(review.comment || "").trim() ? (
+								<p className="mt-1 text-xs text-amber-900">{String(review.comment || "").trim()}</p>
+							) : null}
+						</div>
+					) : null}
+
+					{!review && canReview ? (
+						<div className="rounded-xl border border-violet-200 bg-violet-50/70 p-3">
+							<p className="text-xs font-semibold uppercase tracking-wide text-violet-700">Rate this trip</p>
+							<div className="mt-2 grid gap-2 sm:grid-cols-[120px_1fr_auto] sm:items-center">
+								<select
+									value={ratingInput}
+									onChange={(event) => setRatingInput(event.target.value)}
+									className="h-9 rounded-lg border border-violet-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-violet-300"
+								>
+									<option value="5">5 - Excellent</option>
+									<option value="4">4 - Very Good</option>
+									<option value="3">3 - Good</option>
+									<option value="2">2 - Fair</option>
+									<option value="1">1 - Poor</option>
+								</select>
+								<input
+									type="text"
+									value={commentInput}
+									onChange={(event) => setCommentInput(event.target.value)}
+									maxLength={500}
+									placeholder="Share your experience (optional)"
+									className="h-9 rounded-lg border border-violet-200 bg-white px-3 text-sm text-slate-700 outline-none focus:border-violet-300"
+								/>
+								<button
+									type="button"
+									onClick={onSubmitReviewClick}
+									disabled={submittingReview}
+									className="rounded-lg bg-violet-600 px-3 py-2 text-xs font-semibold text-white transition hover:bg-violet-700 disabled:opacity-70"
+								>
+									{submittingReview ? "Submitting..." : "Submit"}
+								</button>
+							</div>
+							{reviewTouched && reviewError ? (
+								<p className="mt-2 text-xs text-rose-600">{reviewError}</p>
+							) : null}
+						</div>
+					) : null}
 				</div>
 
 				<div className="flex min-w-48 flex-row items-end justify-between gap-3 sm:flex-col sm:items-end">

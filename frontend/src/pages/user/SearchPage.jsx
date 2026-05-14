@@ -20,6 +20,7 @@ import { getBusImageUrl } from "../../utils/helpers";
 
 const SORT_OPTIONS = [
   { value: "recommended", label: "Recommended" },
+  { value: "highest-rated", label: "Highest rated" },
   { value: "price-asc", label: "Price low to high" },
   { value: "price-desc", label: "Price high to low" },
   { value: "departure-early", label: "Departure early" },
@@ -240,7 +241,9 @@ const mapScheduleToViewModel = (schedule) => {
   const arrivalLabel = formatTime(schedule?.arrivalTime || "");
   const durationLabel = formatDuration(schedule, departureMinutes, arrivalMinutes);
 
-  const availableSeats = Number(schedule?.bus?.totalSeats) || 0;
+  const availableSeats = Number.isFinite(Number(schedule?._availableSeats))
+    ? Number(schedule?._availableSeats)
+    : (Number(schedule?.bus?.totalSeats) || 0);
   const busName = String(schedule?.bus?.name || "Bus").trim() || "Bus";
   const source = String(schedule?.route?.source || "").trim() || "Unknown";
   const destination = String(schedule?.route?.destination || "").trim() || "Unknown";
@@ -268,6 +271,9 @@ const mapScheduleToViewModel = (schedule) => {
     .filter((point) => point.name);
 
   const startingPrice = getStartingPrice(schedule);
+  const avgRating = Number(schedule?.bus?.avgRating || 0);
+  const reviewCount = Number(schedule?.bus?.reviewCount || 0);
+  const weightedScore = Number(schedule?.bus?.weightedScore || 0);
 
   return {
     id: schedule?._id,
@@ -284,6 +290,9 @@ const mapScheduleToViewModel = (schedule) => {
     durationLabel,
     durationMinutes: Number(schedule?.durationMinutes) || null,
     availableSeats,
+    avgRating,
+    reviewCount,
+    weightedScore,
     startingPrice,
     imageUrl: getBusImageUrl(schedule?.bus, "bus"),
     seatLayoutImageUrl: getBusImageUrl(schedule?.bus, "seatLayout"),
@@ -470,6 +479,20 @@ export default function SearchPage() {
 
     if (sortBy === "price-asc") {
       return list.sort((a, b) => a.startingPrice - b.startingPrice);
+    }
+
+    if (sortBy === "highest-rated") {
+      return list.sort((a, b) => {
+        const leftWeighted = Number(a.weightedScore || 0);
+        const rightWeighted = Number(b.weightedScore || 0);
+        if (leftWeighted !== rightWeighted) return rightWeighted - leftWeighted;
+
+        const leftAvg = Number(a.avgRating || 0);
+        const rightAvg = Number(b.avgRating || 0);
+        if (leftAvg !== rightAvg) return rightAvg - leftAvg;
+
+        return Number(b.reviewCount || 0) - Number(a.reviewCount || 0);
+      });
     }
 
     if (sortBy === "price-desc") {

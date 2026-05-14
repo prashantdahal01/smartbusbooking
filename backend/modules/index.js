@@ -18,6 +18,7 @@ router.use("/payment", require("./payment/payment.routes"));
 router.use("/payments", require("./payment/payment.routes"));
 router.use("/seat", require("./seat/seat.routes"));
 router.use("/seat-lock", require("./seatLock/seatLock.routes"));
+router.use("/reviews", require("./review/review.routes"));
 
 // Let's check if seatLock module has its own routes. If yes, mount it.
 // seatLock routes were previously in routes/seatLock.routes.js

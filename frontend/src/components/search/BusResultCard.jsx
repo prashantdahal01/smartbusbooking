@@ -8,6 +8,7 @@ import {
   MapPin,
   ShieldCheck,
   Sparkles,
+  Star,
 } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
@@ -126,6 +127,10 @@ export default function BusResultCard({ item }) {
     return renderPolicies();
   };
 
+  const ratingValue = Number(item.avgRating || 0);
+  const reviewCount = Number(item.reviewCount || 0);
+  const hasReviews = reviewCount > 0;
+
   return (
     <motion.article
       layout
@@ -214,6 +219,10 @@ export default function BusResultCard({ item }) {
             <span className="inline-flex items-center gap-1.5">
               <Armchair className="h-3.5 w-3.5 text-violet-600" />
               {item.availableSeats} seats available
+            </span>
+            <span className="ml-3 inline-flex items-center gap-1.5">
+              <Star className={`h-3.5 w-3.5 ${hasReviews ? "fill-amber-400 text-amber-500" : "text-slate-400"}`} />
+              {hasReviews ? `${ratingValue.toFixed(1)} (${reviewCount})` : "No reviews yet"}
             </span>
           </div>
         </div>

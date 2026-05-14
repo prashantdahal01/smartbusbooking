@@ -11,6 +11,7 @@ const {
 	matchRouteSegment,
 	buildOrderedRoutePath,
 } = require("./routeSegment");
+const recommendation = require("./recommendation");
 
 module.exports = {
 	findShortestPath,
@@ -23,4 +24,5 @@ module.exports = {
 	matchRouteSegment,
 	buildOrderedRoutePath,
 	searchService: require("./search").searchService,
+	recommendation,
 };

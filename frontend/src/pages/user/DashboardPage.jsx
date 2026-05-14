@@ -15,7 +15,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import BookingCard from "../../components/BookingCard";
 import { useAuth } from "../../context/AuthContext";
-import { getMyBookings, retryEsewaPayment, verifyEsewaPayment } from "../../services/booking.service";
+import {
+	getMyBookings,
+	getMyReviews,
+	retryEsewaPayment,
+	submitReview,
+	verifyEsewaPayment,
+} from "../../services/booking.service";
 import { getProfile, updateProfile } from "../../services/user.service";
 import { formatCurrency } from "../../utils/helpers";
 
@@ -66,6 +72,32 @@ const findPaymentNoticeBookingId = (items, paymentToken) => {
 	return "";
 };
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^\d{2}:\d{2}$/;
+
+const parseScheduleDateTimeMs = (dateText, timeText) => {
+	const safeDate = String(dateText || "").trim();
+	if (!DATE_RE.test(safeDate)) return NaN;
+
+	const safeTime = TIME_RE.test(String(timeText || "").trim()) ? String(timeText || "").trim() : "23:59";
+	return new Date(`${safeDate}T${safeTime}:00`).getTime();
+};
+
+const isBookingCompletedForReview = (booking, nowMs = Date.now()) => {
+	const status = String(booking?.status || "").trim().toLowerCase();
+	if (status === "completed") return true;
+	if (status !== "confirmed") return false;
+
+	const schedule = booking?.schedule || {};
+	const completionMs = parseScheduleDateTimeMs(
+		schedule?.arrivalDate || schedule?.date,
+		schedule?.arrivalTime || schedule?.time
+	);
+
+	if (!Number.isFinite(completionMs)) return false;
+	return completionMs < nowMs;
+};
+
 export default function DashboardPage() {
 	const [searchParams, setSearchParams] = useSearchParams();
 	const { currentUser, refreshMe } = useAuth();
@@ -78,6 +110,8 @@ export default function DashboardPage() {
 	const [loadingBookings, setLoadingBookings] = useState(false);
 	const [bookingError, setBookingError] = useState("");
 	const [bookingActionMessage, setBookingActionMessage] = useState(null);
+	const [reviewsByBooking, setReviewsByBooking] = useState({});
+	const [submittingReviewByBooking, setSubmittingReviewByBooking] = useState({});
 	const [retryingBookingId, setRetryingBookingId] = useState("");
 	const [bookingNowMs, setBookingNowMs] = useState(() => Date.now());
 	const [paymentNotice, setPaymentNotice] = useState(null);
@@ -231,12 +265,46 @@ export default function DashboardPage() {
 		setLoadingBookings(true);
 		setBookingError("");
 		try {
-			const data = await getMyBookings();
-			setBookings(Array.isArray(data) ? data : []);
+			const bookingData = await getMyBookings();
+			const safeBookings = Array.isArray(bookingData) ? bookingData : [];
+			setBookings(safeBookings);
+
+			try {
+				const reviewRows = await getMyReviews();
+				const byBooking = {};
+				(Array.isArray(reviewRows) ? reviewRows : []).forEach((review) => {
+					const bookingId = String(review?.bookingId || "").trim();
+					if (!bookingId) return;
+					byBooking[bookingId] = review;
+				});
+				setReviewsByBooking(byBooking);
+			} catch {
+				setReviewsByBooking({});
+			}
 		} catch (err) {
 			setBookingError(err?.response?.data?.message || err.message || "Failed to load bookings");
 		} finally {
 			setLoadingBookings(false);
+		}
+	};
+
+	const onSubmitBookingReview = async ({ bookingId, busId, rating, comment }) => {
+		const safeBookingId = String(bookingId || "").trim();
+		if (!safeBookingId) {
+			throw new Error("Missing bookingId");
+		}
+
+		setSubmittingReviewByBooking((prev) => ({ ...prev, [safeBookingId]: true }));
+
+		try {
+			const review = await submitReview({ bookingId: safeBookingId, busId, rating, comment });
+			setReviewsByBooking((prev) => ({ ...prev, [safeBookingId]: review }));
+			return review;
+		} catch (error) {
+			const message = error?.response?.data?.message || error?.message || "Unable to submit review";
+			throw new Error(message);
+		} finally {
+			setSubmittingReviewByBooking((prev) => ({ ...prev, [safeBookingId]: false }));
 		}
 	};
 
@@ -381,6 +449,20 @@ export default function DashboardPage() {
 			totalSpent,
 		};
 	}, [bookings]);
+
+	const bookingReviewMeta = useMemo(() => {
+		const next = {};
+		bookings.forEach((booking) => {
+			const bookingId = String(booking?._id || "").trim();
+			if (!bookingId) return;
+
+			next[bookingId] = {
+				review: reviewsByBooking[bookingId] || null,
+				canReview: isBookingCompletedForReview(booking, bookingNowMs),
+			};
+		});
+		return next;
+	}, [bookings, bookingNowMs, reviewsByBooking]);
 
 	return (
 		<div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
@@ -533,15 +615,23 @@ export default function DashboardPage() {
 						</div>
 					) : (
 						<div className="grid gap-4">
-							{bookings.map((booking) => (
+							{bookings.map((booking) => {
+								const bookingId = String(booking?._id || "").trim();
+								const meta = bookingReviewMeta[bookingId] || { review: null, canReview: false };
+								return (
 								<BookingCard
 									key={booking._id}
 									booking={booking}
 									nowMs={bookingNowMs}
 									onRetryPayment={onRetryPayment}
 									retrying={retryingBookingId === String(booking?._id || "")}
+									review={meta.review}
+									canReview={meta.canReview}
+									onSubmitReview={onSubmitBookingReview}
+									submittingReview={Boolean(submittingReviewByBooking[bookingId])}
 								/>
-							))}
+								);
+							})}
 						</div>
 					)}
 
