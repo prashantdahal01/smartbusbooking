@@ -3,6 +3,11 @@
   "private": true,
   "scripts": {
     "build": "npm --prefix frontend install && npm --prefix frontend run build",
-    "dev": "npm --prefix frontend run dev"
+    "dev": "npm --prefix frontend run dev",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.90.1"
   }
 }
