@@ -40,3 +40,9 @@ backend.worktrees/
 
 # Coverage
 coverage/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
