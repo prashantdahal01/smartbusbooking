@@ -6,6 +6,7 @@ const { authorizeRoles } = require("../../middleware/role.middleware");
 
 router.get("/route-plan", scheduleController.getDistrictRoutePlan);
 router.get("/search", scheduleController.searchSchedules);
+router.get("/available", scheduleController.getAvailableSchedules);
 router.get("/options", scheduleController.getSearchOptions);
 router.get("/operator", verifyToken, authorizeRoles("operator"), scheduleController.getOperatorSchedules);
 router.post("/", verifyToken, authorizeRoles("operator"), scheduleController.createOperatorSchedule);

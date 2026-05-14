@@ -394,6 +394,20 @@ const searchSchedules = async ({ query } = {}) => {
 };
 
 /**
+ * Get available schedules for today and upcoming dates.
+ * @returns {Promise<object[]>}
+ */
+const getAvailableSchedules = async () => {
+  const todayDateKey = getTodayDateKey();
+  const schedules = await Schedule.find({ isActive: true, date: { $gte: todayDateKey } })
+    .populate("bus")
+    .populate("route")
+    .sort({ date: 1, time: 1 });
+
+  return schedules.map((schedule) => routeSegmentService.normalizeScheduleForOutput(schedule));
+};
+
+/**
  * Get district route plan.
  * @param {object} params
  * @param {object} params.query
@@ -888,6 +902,7 @@ const getSeatStatus = async ({ scheduleId }) => {
 
 module.exports = {
   searchSchedules,
+  getAvailableSchedules,
   getDistrictRoutePlan,
   getSearchOptions,
   getOperatorSchedules,

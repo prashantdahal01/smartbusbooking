@@ -28,6 +28,15 @@ exports.searchSchedules = async (req, res) => {
   }
 };
 
+exports.getAvailableSchedules = async (_req, res) => {
+  try {
+    const data = await scheduleService.getAvailableSchedules();
+    return res.json(data);
+  } catch (error) {
+    return handleControllerErrorRaw(res, error);
+  }
+};
+
 exports.getDistrictRoutePlan = async (req, res) => {
   try {
     const data = await scheduleService.getDistrictRoutePlan({ query: req.query });

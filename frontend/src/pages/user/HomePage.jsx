@@ -1,12 +1,13 @@
 import { ArrowRight, BusFront, Clock3, ShieldCheck, Ticket, MapPin, ArrowUpRight } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { getPopularRoutes, searchSchedules } from "../../services/booking.service";
+import { getAvailableSchedules, getPopularRoutes } from "../../services/booking.service";
 import { getBusTypeLabels } from "../../utils/busTypeUtils";
 import { formatCurrency, getBusImageUrl } from "../../utils/helpers";
 import DatePicker from "../../components/search/DatePicker";
 import LocationAutocompleteInput from "../../components/search/LocationAutocompleteInput";
 import SwapButton from "../../components/search/SwapButton";
+import AvailableBusesSection from "../../components/AvailableBusesSection";
 
 const HimalayaHeroScene = lazy(() => import("../../components/hero/HimalayaHeroScene"));
 
@@ -260,7 +261,7 @@ export default function HomePage() {
       setFeaturedLoading(true);
       setFeaturedError("");
       try {
-        const data = await searchSchedules({});
+        const data = await getAvailableSchedules();
         const allSchedules = Array.isArray(data) ? data : [];
         const upcomingSchedules = allSchedules
           .filter((schedule) => {
@@ -841,138 +842,13 @@ export default function HomePage() {
         </section>
 
         {/* ───────────── AVAILABLE BUSES ───────────── */}
-        <section data-reveal className="reveal-section mt-24">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2.5">
-                <div className="h-px w-8 bg-emerald-500" />
-                <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-emerald-400">Available Buses</span>
-              </div>
-              <h2
-                className="mt-2 text-4xl font-black text-slate-900 sm:text-5xl"
-                style={{ fontFamily: "'DM Serif Display', Georgia, serif" }}
-              >
-                Choose Your Ride
-              </h2>
-            </div>
-            <Link
-              to="/search"
-              className="group inline-flex items-center gap-1.5 text-sm font-bold text-slate-400 transition hover:text-amber-400"
-            >
-              View all schedules
-              <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
-            </Link>
-          </div>
-
-          {featuredLoading && (
-            <div className="mt-8 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-              {[...Array(3)].map((_, i) => (
-                <div key={i} className="h-96 animate-pulse rounded-2xl bg-slate-200" />
-              ))}
-            </div>
-          )}
-
-          {!featuredLoading && featuredError && (
-            <div className="mt-6 rounded-xl border border-rose-800/50 bg-rose-900/30 px-5 py-4 text-sm text-rose-400">
-              {featuredError}
-            </div>
-          )}
-
-          {!featuredLoading && !featuredError && (
-            <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-              {featuredSchedules.length > 0 ? (
-                featuredSchedules.map((schedule) => {
-                  const busImage = getBusImageUrl(schedule?.bus, "bus");
-                  const title = String(schedule?.bus?.name || "Bus Service").trim();
-                  const sourceLabel = String(schedule?.route?.source || "").trim();
-                  const destinationLabel = String(schedule?.route?.destination || "").trim();
-                  const travelDateLabel = formatDateLabel(schedule?.date);
-                  const departureTimeLabel = formatTimeLabel(schedule?.time);
-                  const arrivalTimeLabel = getArrivalTimeLabel(schedule);
-                  const badgeLabel = getBusTypeLabels(schedule?.bus)[0] || toTitleLabel(schedule?.bus?.type) || "Bus";
-                  const startingPrice = getStartingPrice(schedule);
-
-                  return (
-                    <article
-                      key={schedule._id}
-                      className="route-card group overflow-hidden rounded-2xl border border-slate-200 bg-white/95 transition-all duration-300 hover:border-slate-300"
-                    >
-                      {/* Bus image */}
-                      <div className="relative h-44 overflow-hidden bg-slate-100">
-                        {busImage ? (
-                          <img
-                            src={busImage}
-                            alt={title}
-                            loading="lazy"
-                            decoding="async"
-                            className="h-full w-full object-cover brightness-95 transition-transform duration-500 group-hover:scale-105"
-                          />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center bg-linear-to-br from-slate-100 to-slate-200">
-                            <BusFront className="h-12 w-12 text-slate-600" />
-                          </div>
-                        )}
-                        {/* Date chip */}
-                        <div className="absolute left-3 top-3 rounded-lg border border-slate-200 bg-white/90 px-2.5 py-1 text-xs font-semibold text-slate-700 backdrop-blur-sm">
-                          {travelDateLabel}
-                        </div>
-                        {/* Type badge */}
-                        <div className="absolute right-3 top-3 rounded-lg bg-amber-500/90 px-2.5 py-1 text-xs font-bold text-slate-950 backdrop-blur-sm">
-                          {badgeLabel}
-                        </div>
-                      </div>
-
-                      <div className="p-5">
-                        {/* Title & route */}
-                        <div>
-                          <h3 className="text-lg font-bold text-slate-900">{title}</h3>
-                          <div className="mt-1 flex items-center gap-1.5 text-sm text-slate-400">
-                            <span>{sourceLabel}</span>
-                            <ArrowRight className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-                            <span>{destinationLabel}</span>
-                          </div>
-                        </div>
-
-                        {/* Time row */}
-                        <div className="mt-4 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-100 px-4 py-3">
-                          <Clock3 className="h-4 w-4 shrink-0 text-slate-500" />
-                          <span className="text-sm font-semibold text-slate-700">{departureTimeLabel}</span>
-                          <div className="mx-1 h-px flex-1 border-t border-dashed border-slate-300" />
-                          <span className="text-sm font-semibold text-slate-700">{arrivalTimeLabel}</span>
-                        </div>
-                        <p className="mt-2 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-300/90">
-                          {getDepartureCountdownLabel(schedule, nowTs)}
-                        </p>
-
-                        {/* Price + CTA */}
-                        <div className="mt-4 flex items-end justify-between gap-3">
-                          <div>
-                            <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Starting from</p>
-                            <div className="mt-0.5 text-2xl font-black text-amber-400">
-                              {startingPrice ? formatCurrency(startingPrice) : <span className="text-base font-semibold text-slate-400">See seat map</span>}
-                            </div>
-                          </div>
-                          <Link
-                            to={`/seats/${schedule._id}`}
-                            onClick={triggerRgbFlash}
-                            className="rgb-action rgb-action-solid group/btn inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white/95 px-4 py-2.5 text-sm font-bold text-slate-900 transition-all duration-200"
-                          >
-                            View Seats
-                            <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover/btn:translate-x-0.5" />
-                          </Link>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })
-              ) : (
-                <div className="rounded-2xl border border-slate-200 bg-white/85 px-6 py-5 text-sm text-slate-500 sm:col-span-2 lg:col-span-3">
-                  No schedules found for today. Try searching by route and date.
-                </div>
-              )}
-            </div>
-          )}
-        </section>
+        <AvailableBusesSection
+          featuredSchedules={featuredSchedules}
+          featuredLoading={featuredLoading}
+          featuredError={featuredError}
+          nowTs={nowTs}
+          triggerRgbFlash={triggerRgbFlash}
+        />
 
         {/* ───────────── CTA BANNER ───────────── */}
         <section data-reveal className="reveal-section relative mt-24 overflow-hidden rounded-3xl border border-slate-200 bg-white/95">
